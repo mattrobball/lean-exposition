@@ -40,11 +40,9 @@ Example:
 ```bash
 cd /path/to/target-repo
 lake exe cache get
-lake build BridgelandStability
+lake build MyLibrary
 lake env /path/to/lean-exposition/.lake/build/bin/exposition \
-  --root BridgelandStability \
-  --exclude-lib BridgelandSpec \
-  --exclude-lib BridgelandBlueprint \
+  --root MyLibrary \
   --repo-url https://github.com/owner/repo \
   --output /path/to/site-out
 ```
@@ -52,12 +50,29 @@ lake env /path/to/lean-exposition/.lake/build/bin/exposition \
 Verso writes the site into the chosen output directory, typically under
 `html-multi/`.
 
+Optional target-specific flags:
+
+```bash
+lake env /path/to/lean-exposition/.lake/build/bin/exposition \
+  --root MyLibrary \
+  --exclude-lib MySpec \
+  --comparator-config comparator.json \
+  --tfb-exe extractDeps \
+  --output /path/to/site-out
+```
+
+If the target repo provides a comparator config plus a dependency-closure
+executable, `LeanExposition` will compute and render the trusted formalization
+base view.
+
 ## Options
 
 - `--root PREFIX`: root module prefix to expose
 - `--repo-url URL`: base GitHub URL used for source and issue links
 - `--title TITLE`: override the site title
 - `--output DIR`: output directory passed through to Verso
+- `--comparator-config FILE`: comparator config file relative to the target project root
+- `--tfb-exe NAME`: Lake executable used to compute the trusted-base dependency closure
 - `--exclude-lib NAME`: root library to skip when importing the target project
 - `--project DIR`: alternate workspace path, currently experimental
 
@@ -66,5 +81,5 @@ Verso writes the site into the chosen output directory, typically under
 - v1 still relies on plain text code blocks and source-file snippets, not SubVerso highlighting
 - undocumented declarations render without prose
 - dependency links and graph edges are only emitted for exposed declarations
-- comparator integration currently reads `comparator.json` and computes the exposed TFB via the target repo's `extractDeps` traversal; it does not yet consume richer comparator output
+- comparator integration currently depends on a target-side comparator config and dependency-closure executable; it does not yet consume richer comparator output directly
 - issue URLs are generated from `--repo-url` and assume a standard `main` branch layout

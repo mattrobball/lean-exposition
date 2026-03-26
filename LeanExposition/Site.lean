@@ -25,6 +25,8 @@ structure Cli where
   repoUrl : Option String := none
   siteTitle : Option String := none
   outputDir : Option String := none
+  comparatorConfig : Option System.FilePath := none
+  tfbExe : String := "extractDeps"
   excludeLibs : Array Name := #[]
 deriving Repr
 
@@ -159,6 +161,8 @@ private def usage : String :=
     "  --repo-url URL       GitHub repo URL used for issue/source links",
     "  --title TITLE        Site title override",
     "  --output DIR         Output directory passed to Verso",
+    "  --comparator-config  Comparator config file relative to the target project",
+    "  --tfb-exe NAME       Lake executable used to compute the trusted-base closure",
     "  --exclude-lib NAME   Exclude a root library when importing the target project",
   ]
 
@@ -179,6 +183,12 @@ private def parseArgs : List String → Except String Cli
   | "--output" :: out :: rest => do
       let cfg ← parseArgs rest
       pure { cfg with outputDir := some out }
+  | "--comparator-config" :: path :: rest => do
+      let cfg ← parseArgs rest
+      pure { cfg with comparatorConfig := some path }
+  | "--tfb-exe" :: exe :: rest => do
+      let cfg ← parseArgs rest
+      pure { cfg with tfbExe := exe }
   | "--exclude-lib" :: lib :: rest => do
       let cfg ← parseArgs rest
       pure { cfg with excludeLibs := cfg.excludeLibs.push lib.toName }
@@ -367,8 +377,9 @@ private def extractDepsName? (line : String) : Option Name :=
   else
     none
 
-private def loadComparatorConfig? (projectDir : System.FilePath) : IO (Option ComparatorConfigInfo) := do
-  let cfgPath := projectDir / "comparator.json"
+private def loadComparatorConfig? (projectDir : System.FilePath)
+    (configPath? : Option System.FilePath := none) : IO (Option ComparatorConfigInfo) := do
+  let cfgPath := projectDir / configPath?.getD "comparator.json"
   let text? ← readFileIfExists cfgPath
   match text? with
   | none => return none
@@ -480,14 +491,14 @@ private def loadTrustedBaseTargetBlocks (projectDir : System.FilePath) (repoUrl?
       pure blocks
 
 private def computeTrustedBaseNames (projectDir : System.FilePath) (rootPrefix : Name)
-    (targets : Array Name) : IO (Std.HashSet Name) := do
+    (targets : Array Name) (tfbExe : String := "extractDeps") : IO (Std.HashSet Name) := do
   if targets.isEmpty then
     return {}
   let mut names : Std.HashSet Name := {}
   for target in targets do
     let out ← IO.Process.output {
       cmd := "lake"
-      args := #["exe", "extractDeps", target.toString, rootPrefix.toString]
+      args := #["exe", tfbExe, target.toString, rootPrefix.toString]
       cwd := some projectDir
     }
     if out.exitCode != 0 then
@@ -497,13 +508,13 @@ private def computeTrustedBaseNames (projectDir : System.FilePath) (rootPrefix :
         names := names.insert dep
   pure names
 
-private def loadTrustedBaseInfo (projectDir : System.FilePath) (rootPrefix : Name) : IO TrustedBaseInfo := do
-  let comparator? ← loadComparatorConfig? projectDir
+private def loadTrustedBaseInfo (cfg : Cli) (rootPrefix : Name) : IO TrustedBaseInfo := do
+  let comparator? ← loadComparatorConfig? cfg.projectDir cfg.comparatorConfig
   let comparatorInstalled ← isComparatorInstalled
   match comparator? with
   | none => pure { comparatorInstalled := comparatorInstalled }
   | some comparator =>
-      let names ← computeTrustedBaseNames projectDir rootPrefix comparator.theoremNames
+      let names ← computeTrustedBaseNames cfg.projectDir rootPrefix comparator.theoremNames cfg.tfbExe
       pure {
         names
         comparator? := some comparator
@@ -2218,7 +2229,7 @@ unsafe def mainImpl (args : List String) : IO UInt32 := do
     IO.eprintln s!"No declarations exposed under module filtering. Declarations with matching name prefix: {namedCount}"
   else
     IO.println s!"Collected {decls.size} declarations under {rootPrefix}"
-  let tfbInfo ← loadTrustedBaseInfo cfg.projectDir rootPrefix
+  let tfbInfo ← loadTrustedBaseInfo cfg rootPrefix
   let decls := decls |> attachReverseDeps |> attachDependsOnSorry |> attachTrustedBaseFlags tfbInfo.names
   let order ← moduleOrderMap cfg.projectDir rootPrefix
   let modules := buildModules rootPrefix order decls
