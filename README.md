@@ -30,6 +30,46 @@ lake update
 lake build exposition
 ```
 
+## Prebuilt CI Binaries
+
+The `Publish Exposition Binary` workflow runs on pushes to `master`, on tags,
+and on manual dispatches. It builds the Linux `x86_64` binary on
+`ubuntu-latest`, then publishes an artifact named
+`exposition-linux-x86_64-$SOURCE_SHA`.
+
+Each published artifact contains:
+
+- `exposition-linux-x86_64-$SOURCE_SHA.tar.gz`
+- `exposition-linux-x86_64-$SOURCE_SHA.metadata.json`
+- `SHA256SUMS`
+
+The tarball expands to a directory containing the `exposition` binary,
+`lean-toolchain`, and the same `metadata.json` file. On tag builds, the same
+files are also attached to the corresponding GitHub release.
+
+Downstream CI can resolve the publishing run for a particular
+`lean-exposition` commit and download the matching artifact with `gh`:
+
+```bash
+SOURCE_SHA=<lean-exposition commit>
+REPO=mattrobball/lean-exposition
+RUN_ID=$(gh run list \
+  -R "$REPO" \
+  --workflow "Publish Exposition Binary" \
+  --event push \
+  --commit "$SOURCE_SHA" \
+  --status success \
+  --json databaseId \
+  --jq '.[0].databaseId')
+gh run download "$RUN_ID" \
+  -R "$REPO" \
+  -n "exposition-linux-x86_64-$SOURCE_SHA" \
+  -D ./exposition-artifact
+tar -xzf \
+  "./exposition-artifact/exposition-linux-x86_64-$SOURCE_SHA/exposition-linux-x86_64-$SOURCE_SHA.tar.gz" \
+  -C ./exposition-artifact
+```
+
 ## Run Against A Target Repo
 
 The target repo must already have current `.olean` files for the modules you
