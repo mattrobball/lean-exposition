@@ -1533,16 +1533,28 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   lines := lines.push graphFence
   lines := lines.push ""
   -- Module pages: each # creates a separate page (TFB entries only, solution is on overview)
+  -- Order modules by minimum dependency layer
+  let layerMap := shadowLayerMapFromOrderedEntries tfbOnlyEntries
   let mut byModule : Std.HashMap Name (Array ShadowEntry) := {}
+  let mut moduleMinLayer : Std.HashMap Name Nat := {}
   for entry in tfbOnlyEntries do
     byModule := byModule.insert entry.moduleName ((byModule.getD entry.moduleName #[]).push entry)
-  let sortedModules := byModule.toArray.qsort (fun a b => a.1.lt b.1)
+    let layer := layerMap.getD entry.name 999
+    let prev := moduleMinLayer.getD entry.moduleName 999
+    if layer < prev then
+      moduleMinLayer := moduleMinLayer.insert entry.moduleName layer
+  let sortedModules := byModule.toArray.qsort fun a b =>
+    let la := moduleMinLayer.getD a.1 999
+    let lb := moduleMinLayer.getD b.1 999
+    if la == lb then a.1.lt b.1 else la < lb
   for (modName, modEntries) in sortedModules do
     let kinds := modEntries.map (·.kind.label) |>.toList.eraseDups
     let kindSummary := String.intercalate ", " kinds
-    lines := lines.push s!"# `{modName}`"
+    -- Plain text heading (no backticks) so TOC font matches Overview
+    let shortName := (modName.toString.dropPrefix "BridgelandStability.").toString
+    lines := lines.push s!"# {shortName}"
     lines := lines.push ""
-    lines := lines.push s!"*{modEntries.size}* declarations ({kindSummary})"
+    lines := lines.push s!"Module `{modName}` — *{modEntries.size}* declarations ({kindSummary})"
     lines := lines.push ""
     for entry in modEntries do
       lines ← appendShadowEntryBlock env lines 2 entry repoUrl?
