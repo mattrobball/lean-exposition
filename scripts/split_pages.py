@@ -174,8 +174,9 @@ def split_html(html_dir):
         page = (
             f'<!DOCTYPE html>\n<html>\n{sub_head}\n<body>\n'
             f'<header><div class="header-logo-wrapper"></div>'
-            f'<div class="header-title-wrapper"></div>'
-            f'</header>\n'
+            f'<div class="header-title-wrapper">'
+            f'<a href="../" class="header-title"><h1>{manual_title}</h1></a>'
+            f'</div></header>\n'
             f'{burger}'
             f'<div class="with-toc">\n'
             f'<div class="toc-backdrop" onclick="document.getElementById(\'toggle-toc-click\')?.click()"></div>\n'
@@ -193,8 +194,9 @@ def split_html(html_dir):
     landing = (
         f'<!DOCTYPE html>\n<html>\n{head}\n<body>\n'
         f'<header><div class="header-logo-wrapper"></div>'
-        f'<div class="header-title-wrapper"></div>'
-        f'</header>\n'
+        f'<div class="header-title-wrapper">'
+        f'<a href="" class="header-title"><h1>{manual_title}</h1></a>'
+        f'</div></header>\n'
         f'{burger}'
         f'<div class="with-toc">\n'
         f'<div class="toc-backdrop" onclick="document.getElementById(\'toggle-toc-click\')?.click()"></div>\n'
