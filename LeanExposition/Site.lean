@@ -1463,7 +1463,7 @@ private def buildShadowGraphData (entries : Array ShadowEntry) : GraphData := Id
   return { nodes, edges }
 
 private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInfo)
-    (entries : Array ShadowEntry) (repoUrl? : Option String := none) : IO String := do
+    (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none) : IO String := do
   let some comparator := tfbInfo.comparator?
     | return String.intercalate "\n" [
         "import VersoManual",
@@ -1506,8 +1506,8 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     "set_option maxHeartbeats 2000000",
     "set_option verso.exampleProject \".\"",
     "",
-    let targetName := comparator.theoremNames[0]?.map (·.getString!) |>.getD comparator.solutionModule
-    s!"#doc (Manual) \"{targetName} Comparator Manual\" =>",
+    let rootName := rootPrefix.toString
+    s!"#doc (Manual) \"{rootName} Comparator Manual\" =>",
     "%%%",
     "htmlSplit := .never",
     "%%%",
@@ -1793,9 +1793,9 @@ private def renderComparatorManualSupport : String :=
   ]
 
 private def writeComparatorManualFiles (env : Environment) (shadowDir : System.FilePath) (tfbInfo : TrustedBaseInfo)
-    (entries : Array ShadowEntry) (repoUrl? : Option String := none) : IO Unit := do
+    (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none) : IO Unit := do
   IO.FS.writeFile (shadowDir / s!"{comparatorManualSupportModule}.lean") renderComparatorManualSupport
-  IO.FS.writeFile (shadowDir / s!"{comparatorManualModule}.lean") (← renderComparatorManual env tfbInfo entries repoUrl?)
+  IO.FS.writeFile (shadowDir / s!"{comparatorManualModule}.lean") (← renderComparatorManual env tfbInfo entries rootPrefix repoUrl?)
   IO.FS.writeFile (shadowDir / s!"{comparatorManualMainModule}.lean") renderComparatorManualMain
 
 private def insertBeforeMarkerOrAppend (contents marker block : String) : String :=
@@ -2059,7 +2059,7 @@ private unsafe def writeComparatorShadow (projectDir shadowDir : System.FilePath
   copyShadowConfigFiles projectDir shadowDir
   ensureVersoInShadowProject shadowDir
   writeShadowManifest shadowDir tfbInfo entries
-  writeComparatorManualFiles env shadowDir tfbInfo entries repoUrl?
+  writeComparatorManualFiles env shadowDir tfbInfo entries rootPrefix repoUrl?
   buildShadowSite shadowDir
 
 private def collectDecls (projectDir : System.FilePath) (rootPrefix : Name)
