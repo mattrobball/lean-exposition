@@ -1540,33 +1540,23 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   lines := lines.push graphJson
   lines := lines.push graphFence
   lines := lines.push ""
-  -- Solution theorem section
-  if solutionEntries.isEmpty then
-    lines := appendTaggedHeading lines 1 "Solution theorem" "shadow-solution-theorem"
-    lines := lines.push "No solution theorem declarations were resolved from the comparator configuration."
-    lines := lines.push ""
-  else
-    lines := appendTaggedHeading lines 1 "Solution theorem" "shadow-solution-theorem"
-    lines := lines.push s!"The comparator target theorem is rendered from `{comparator.solutionModule}`."
-    lines := lines.push ""
-    for entry in solutionEntries do
-      lines ← appendShadowEntryBlock env lines 2 entry repoUrl?
-  -- Trusted formalization base section
+  -- Trusted formalization base: organized by module
   lines := appendTaggedHeading lines 1 "Trusted formalization base" "shadow-trusted-formalization-base"
   lines := lines.push "These are the exposed declarations a reader must trust in order to accept the comparator-facing theorem."
   lines := lines.push ""
-  if tfbOnlyEntries.isEmpty then
-    lines := lines.push "No trusted-base declarations were resolved."
+  -- Group all entries (solution + TFB) by module
+  let allEntries := solutionEntries ++ tfbOnlyEntries
+  let mut byModule : Std.HashMap Name (Array ShadowEntry) := {}
+  for entry in allEntries do
+    byModule := byModule.insert entry.moduleName ((byModule.getD entry.moduleName #[]).push entry)
+  let sortedModules := byModule.toArray.qsort (fun a b => a.1.lt b.1)
+  for (modName, modEntries) in sortedModules do
+    let tag := shadowTagForModule modName
+    let kinds := modEntries.map (·.kind.label) |>.toList.eraseDups
+    let kindSummary := String.intercalate ", " kinds
+    lines := appendTaggedHeading lines 2 s!"`{modName}`" tag
+    lines := lines.push s!"*{modEntries.size}* declarations ({kindSummary})"
     lines := lines.push ""
-  else
-    let layerMap := shadowLayerMapFromOrderedEntries tfbOnlyEntries
-    let mut currentLayer? : Option Nat := none
-    for entry in tfbOnlyEntries do
-      let layer := layerMap.getD entry.name 1
-      if currentLayer? != some layer then
-        currentLayer? := some layer
-        lines := appendTaggedHeading lines 2 s!"Dependency layer {layer}" (shadowTagForLayer layer)
-      lines ← appendShadowEntryBlock env lines 3 entry repoUrl?
   pure <| String.intercalate "\n" lines.toList
 
 private def renderComparatorManualMain : String :=
