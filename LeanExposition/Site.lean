@@ -1442,6 +1442,24 @@ private def appendShadowEntryBlock (_env : Environment) (lines : Array String) (
       ]
       ++ renderShadowCodeBlock entry snippet
 
+private def buildShadowGraphData (entries : Array ShadowEntry) : GraphData := Id.run do
+  let entryNames : Std.HashSet Name := entries.foldl (fun s e => s.insert e.name) {}
+  let nodes := entries.map fun entry => {
+    id := entry.name.toString
+    label := entry.name.getString!
+    kind := entry.kind.label
+    status := "clean"
+    groupKey := entry.moduleName.toString
+    moduleName := entry.moduleName.toString
+    href := s!"#shadow-entry-{slugify entry.moduleName.toString}-{slugify entry.name.toString}-{entry.source.line}-{entry.source.endLine}"
+  }
+  let mut edges : Array GraphEdge := #[]
+  for entry in entries do
+    for dep in entry.deps do
+      if entryNames.contains dep then
+        edges := edges.push { source := entry.name.toString, target := dep.toString }
+  return { nodes, edges }
+
 private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInfo)
     (entries : Array ShadowEntry) (repoUrl? : Option String := none) : IO String := do
   let some comparator := tfbInfo.comparator?
@@ -1510,6 +1528,18 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     for (mod, count) in moduleList do
       lines := lines.push s!"| `{mod}` | {count} |"
     lines := lines.push ""
+  -- Build graph data for the dependency visualization
+  let graphData := buildShadowGraphData entries
+  let graphJson := Json.compress (ToJson.toJson graphData)
+  -- Dependency graph section
+  lines := appendTaggedHeading lines 1 "Dependency graph" "shadow-dependency-graph"
+  lines := lines.push "Interactive force-directed visualization of the trusted formalization base. Click a node to navigate to its declaration."
+  lines := lines.push ""
+  let graphFence := codeFenceFor graphJson
+  lines := lines.push s!"{graphFence}graphEmbed"
+  lines := lines.push graphJson
+  lines := lines.push graphFence
+  lines := lines.push ""
   -- Solution theorem section
   if solutionEntries.isEmpty then
     lines := appendTaggedHeading lines 1 "Solution theorem" "shadow-solution-theorem"
@@ -1717,10 +1747,36 @@ private def renderComparatorManualSupport : String :=
     "        loop remaining hs.toList",
     "  (go n hl).1",
     "",
+    "-- Dependency graph block: renders a D3 force-directed graph from embedded JSON data.",
+    "def Block.dependencyGraph (graphJson : String) : Genre.Manual.Block where",
+    "  name := `ComparatorManualSupport.Block.dependencyGraph",
+    "  data := Lean.Json.str graphJson",
+    "",
+    "open Verso.Output Html in",
+    "@[block_extension Block.dependencyGraph]",
+    "def dependencyGraph.descr : BlockDescr where",
+    "  traverse _ _ _ := pure none",
+    "  toTeX := none",
+    "  extraJs := [\"document.addEventListener('DOMContentLoaded',function(){var el=document.getElementById('graph-data');if(!el)return;var data=JSON.parse(el.textContent);var root=document.getElementById('graph-root');if(!root)return;var w=root.clientWidth,h=600;var svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('width','100%');svg.setAttribute('height',h);svg.setAttribute('viewBox','0 0 '+w+' '+h);root.appendChild(svg);var nodeMap={};data.nodes.forEach(function(n){nodeMap[n.id]=n;});var groups=Array.from(new Set(data.nodes.map(function(n){return n.groupKey})));var colors=['#3d6b59','#b96d2d','#7a4e7a','#2f5f87','#8a3b3b','#5f6f2e','#9a5b8f','#6b5041'];function groupColor(g){return colors[groups.indexOf(g)%colors.length]}var sim=d3.forceSimulation(data.nodes).force('link',d3.forceLink(data.edges).id(function(d){return d.id}).distance(80).strength(0.2)).force('charge',d3.forceManyBody().strength(-210)).force('center',d3.forceCenter(w/2,h/2)).force('collide',d3.forceCollide(22));var g=document.createElementNS('http://www.w3.org/2000/svg','g');svg.appendChild(g);var linkG=document.createElementNS('http://www.w3.org/2000/svg','g');g.appendChild(linkG);var nodeG=document.createElementNS('http://www.w3.org/2000/svg','g');g.appendChild(nodeG);data.edges.forEach(function(e){var line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('stroke','#b8b0a4');line.setAttribute('stroke-opacity','0.6');line.setAttribute('stroke-width','1.2');line._data=e;linkG.appendChild(line)});data.nodes.forEach(function(n){var ng=document.createElementNS('http://www.w3.org/2000/svg','g');ng.setAttribute('cursor','pointer');var c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('r','10');c.setAttribute('fill',groupColor(n.groupKey));c.setAttribute('stroke','#1f6b4b');c.setAttribute('stroke-width','2');ng.appendChild(c);var t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('dx','14');t.setAttribute('dy','4');t.setAttribute('font-size','11');t.setAttribute('fill','#333');t.textContent=n.label;ng.appendChild(t);ng._data=n;ng.addEventListener('click',function(){if(n.href)window.location.hash=n.href.replace('#','')});nodeG.appendChild(ng)});sim.on('tick',function(){linkG.childNodes.forEach(function(l){l.setAttribute('x1',l._data.source.x);l.setAttribute('y1',l._data.source.y);l.setAttribute('x2',l._data.target.x);l.setAttribute('y2',l._data.target.y)});nodeG.childNodes.forEach(function(ng){var d=ng._data;ng.setAttribute('transform','translate('+d.x+','+d.y+')')})});var zoom=d3.zoom().scaleExtent([0.25,4]).on('zoom',function(e){g.setAttribute('transform',e.transform)});d3.select(svg).call(zoom)})\"]",
+    "  extraCss := [\"#graph-root { background: var(--site-card, #fffdf8); border: 1px solid var(--site-border, #d8cdbd); border-radius: 14px; min-height: 620px; padding: 1rem; margin: 1rem 0; } #graph-root svg { display: block; }\"]",
+    "  toHtml := some fun _goI _goB _id info _blocks => open Output.Html in do",
+    "    let graphJson := info.getStr? |>.toOption |>.getD \"{}\"",
+    "    pure {{ <div id=\"graph-root\"><script id=\"graph-data\" type=\"application/json\">{{graphJson}}</script><script src=\"https://d3js.org/d3.v7.min.js\"></script></div> }}",
+    "",
     "private abbrev ManualDocBlock := Verso.Doc.Block Verso.Genre.Manual",
     "",
     "def wrapCollapsible (body : ManualDocBlock) : ManualDocBlock :=",
     "  .other Block.collapsibleProof #[body]",
+    "",
+    "def wrapDependencyGraph (graphJson : String) : ManualDocBlock :=",
+    "  .other (Block.dependencyGraph graphJson) #[]",
+    "",
+    "/-- Embed an interactive dependency graph. The code block body is the JSON data. -/",
+    "@[code_block_expander graphEmbed]",
+    "public meta def graphEmbed : CodeBlockExpander",
+    "  | _args, code => do",
+    "    let json := code.getString",
+    "    pure #[← ``(wrapDependencyGraph $(quote json))]",
     "",
     "/-- Render an anchored external Lean block with the proof body inside",
     "    a collapsed `<details>` element. The signature is always visible. -/",
