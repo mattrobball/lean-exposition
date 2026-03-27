@@ -1505,6 +1505,9 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     "set_option verso.exampleProject \".\"",
     "",
     s!"#doc (Manual) \"{comparator.solutionModule} Comparator Manual\" =>",
+    "%%%",
+    "htmlSplit := .never",
+    "%%%",
     "",
     "# Overview",
     "",
@@ -1529,10 +1532,9 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   lines := lines.push graphJson
   lines := lines.push graphFence
   lines := lines.push ""
-  -- Module pages: each # creates a separate page
-  let allEntries := solutionEntries ++ tfbOnlyEntries
+  -- Module pages: each # creates a separate page (TFB entries only, solution is on overview)
   let mut byModule : Std.HashMap Name (Array ShadowEntry) := {}
-  for entry in allEntries do
+  for entry in tfbOnlyEntries do
     byModule := byModule.insert entry.moduleName ((byModule.getD entry.moduleName #[]).push entry)
   let sortedModules := byModule.toArray.qsort (fun a b => a.1.lt b.1)
   for (modName, modEntries) in sortedModules do
@@ -1542,6 +1544,8 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     lines := lines.push ""
     lines := lines.push s!"*{modEntries.size}* declarations ({kindSummary})"
     lines := lines.push ""
+    for entry in modEntries do
+      lines ← appendShadowEntryBlock env lines 2 entry repoUrl?
   pure <| String.intercalate "\n" lines.toList
 
 private def renderComparatorManualMain : String :=
