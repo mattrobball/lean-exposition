@@ -55,6 +55,9 @@ def split_html(html_dir):
         title = title.replace('\U0001f517', '').strip()
         title = re.sub(r'^\d+\.\s*', '', title)
 
+        # Strip Verso's prev-next nav and section-toc (they have old unsplit links)
+        chunk = re.sub(r'<nav class="prev-next-buttons">[\s\S]*?</nav>', '', chunk)
+        chunk = re.sub(r'<ol class="section-toc">[\s\S]*?</ol>', '', chunk)
         sections.append({'title': title, 'slug': slugify(title), 'html': chunk})
 
     print(f"Found {len(sections)} sections")
@@ -144,9 +147,14 @@ def split_html(html_dir):
         rows = []
         for i, sect in enumerate(sections):
             cls = ' class="current"' if sect['slug'] == current_slug else ''
+            # Overview (first section) links to root, not overview/
+            if i == 0:
+                href = f'{prefix}' if prefix else './'
+            else:
+                href = f'{prefix}{sect["slug"]}/'
             rows.append(
                 f'<tr class="numbered"{cls}><td class="num">{i+1}.</td>'
-                f'<td><a href="{prefix}{sect["slug"]}/">{sect["title"]}</a></td></tr>'
+                f'<td><a href="{href}">{sect["title"]}</a></td></tr>'
             )
         return (
             '<nav id="toc">'
