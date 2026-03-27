@@ -1505,33 +1505,19 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     "set_option verso.exampleProject \".\"",
     "",
     s!"#doc (Manual) \"{comparator.solutionModule} Comparator Manual\" =>",
-    "%%%",
-    "htmlSplit := .never",
-    "%%%",
-    "",
-    -- Overview section
-    "# Overview",
-    "%%%",
-    "tag := \"shadow-overview\"",
-    "%%%",
     "",
     "This manual presents the comparator view of the formalization.",
     s!"It was generated mechanically from the trusted formalization base walk rooted at the comparator target theorem in `{comparator.solutionModule}`.",
-    "",
-    s!"The manual covers *{entries.size}* declarations: *{solutionEntries.size}* solution theorem(s) and *{tfbOnlyEntries.size}* trusted-base declarations across *{moduleCounts.size}* modules.",
+    s!"The formalization covers *{entries.size}* declarations across *{moduleCounts.size}* modules.",
     ""
   ]
-  -- Module summary table
-  if !moduleList.isEmpty then
-    lines := lines.push "| Module | Declarations |"
-    lines := lines.push "|--------|-------------|"
-    for (mod, count) in moduleList do
-      lines := lines.push s!"| `{mod}` | {count} |"
-    lines := lines.push ""
-  -- Build graph data for the dependency visualization
+  -- Solution theorem
+  if !solutionEntries.isEmpty then
+    for entry in solutionEntries do
+      lines ← appendShadowEntryBlock env lines 1 entry repoUrl?
+  -- Dependency graph
   let graphData := buildShadowGraphData entries
   let graphJson := Json.compress (ToJson.toJson graphData)
-  -- Dependency graph section
   lines := appendTaggedHeading lines 1 "Dependency graph" "shadow-dependency-graph"
   lines := lines.push "Interactive force-directed visualization of the trusted formalization base. Click a node to navigate to its declaration."
   lines := lines.push ""
@@ -1540,11 +1526,7 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   lines := lines.push graphJson
   lines := lines.push graphFence
   lines := lines.push ""
-  -- Trusted formalization base: organized by module
-  lines := appendTaggedHeading lines 1 "Trusted formalization base" "shadow-trusted-formalization-base"
-  lines := lines.push "These are the exposed declarations a reader must trust in order to accept the comparator-facing theorem."
-  lines := lines.push ""
-  -- Group all entries (solution + TFB) by module
+  -- Module pages: each module is a top-level section
   let allEntries := solutionEntries ++ tfbOnlyEntries
   let mut byModule : Std.HashMap Name (Array ShadowEntry) := {}
   for entry in allEntries do
@@ -1554,7 +1536,7 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     let tag := shadowTagForModule modName
     let kinds := modEntries.map (·.kind.label) |>.toList.eraseDups
     let kindSummary := String.intercalate ", " kinds
-    lines := appendTaggedHeading lines 2 s!"`{modName}`" tag
+    lines := appendTaggedHeading lines 1 s!"`{modName}`" tag
     lines := lines.push s!"*{modEntries.size}* declarations ({kindSummary})"
     lines := lines.push ""
   pure <| String.intercalate "\n" lines.toList
