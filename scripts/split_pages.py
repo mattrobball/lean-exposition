@@ -164,13 +164,17 @@ def split_html(html_dir):
         sub_toc = build_toc(prefix='../', current_slug=sect['slug'])
         page = (
             f'<!DOCTYPE html>\n<html>\n{sub_head}\n<body>\n'
-            f'<header><div class="header-title-wrapper">'
+            f'<header><div class="header-logo-wrapper"></div>'
+            f'<div class="header-title-wrapper">'
             f'<a href="../" class="header-title"><h1>{sections[0]["title"]}</h1></a>'
             f'</div></header>\n'
-            f'{burger}\n'
-            f'<div class="with-toc">{sub_toc}\n<main>\n'
-            f'<div class="content-wrapper">\n{sect["html"]}\n</div>\n'
-            f'</main></div>\n</body>\n</html>'
+            f'{burger}'
+            f'<div class="with-toc">\n'
+            f'<div class="toc-backdrop" onclick="document.getElementById(\'toggle-toc-click\')?.click()"></div>\n'
+            f'{sub_toc}\n'
+            f'<main><div class="content-wrapper">\n'
+            f'{sect["html"]}\n'
+            f'</div></main></div>\n</body>\n</html>'
         )
         (page_dir / 'index.html').write_text(page)
         print(f"  {sect['slug']}/index.html ({len(sect['html'])} bytes)")
@@ -180,13 +184,17 @@ def split_html(html_dir):
     landing_toc = build_toc(prefix='', current_slug=overview['slug'])
     landing = (
         f'<!DOCTYPE html>\n<html>\n{head}\n<body>\n'
-        f'<header><div class="header-title-wrapper">'
+        f'<header><div class="header-logo-wrapper"></div>'
+        f'<div class="header-title-wrapper">'
         f'<a href="" class="header-title"><h1>{overview["title"]}</h1></a>'
         f'</div></header>\n'
-        f'{burger}\n'
-        f'<div class="with-toc">{landing_toc}\n<main>\n'
-        f'<div class="content-wrapper">\n{overview["html"]}\n</div>\n'
-        f'</main></div>\n</body>\n</html>'
+        f'{burger}'
+        f'<div class="with-toc">\n'
+        f'<div class="toc-backdrop" onclick="document.getElementById(\'toggle-toc-click\')?.click()"></div>\n'
+        f'{landing_toc}\n'
+        f'<main><div class="content-wrapper">\n'
+        f'{overview["html"]}\n'
+        f'</div></main></div>\n</body>\n</html>'
     )
     html_path.write_text(landing)
     print(f"  index.html (Overview landing, {len(overview['html'])} bytes)")
