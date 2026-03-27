@@ -1427,19 +1427,24 @@ private def renderShadowCodeBlock (entry : ShadowEntry) (snippet : String) : Arr
   ]
 
 private def appendShadowEntryBlock (_env : Environment) (lines : Array String) (level : Nat) (entry : ShadowEntry)
-    : IO (Array String) := do
-  let originalSnippet := (← readSourceSnippet entry.source).trimAsciiEnd.toString
-  let snippet := originalSnippet
+    (repoUrl? : Option String := none) : IO (Array String) := do
+  let snippet := (← readSourceSnippet entry.source).trimAsciiEnd.toString
+  let sourceLink := match sourceUrlOf repoUrl? (some entry.source) with
+    | some url => s!" | [Source]({url})"
+    | none => ""
+  let issueLink := match issueUrlOf repoUrl? entry.name entry.moduleName (some entry.source) false with
+    | some url => s!" | [Open Issue]({url})"
+    | none => ""
   pure <|
     (appendTaggedHeading lines level s!"`{entry.name}`" (shadowTagForEntry entry))
       ++ #[
-        s!"Kind: `{entry.kind.label}` | Module: `{entry.moduleName}` | Source: `{entry.source.relPath}:{entry.source.line}`",
+        s!"`{entry.kind.label}` | `{entry.moduleName}`{sourceLink}{issueLink}",
         ""
       ]
       ++ renderShadowCodeBlock entry snippet
 
 private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInfo)
-    (entries : Array ShadowEntry) : IO String := do
+    (entries : Array ShadowEntry) (repoUrl? : Option String := none) : IO String := do
   let some comparator := tfbInfo.comparator?
     | return String.intercalate "\n" [
         "import VersoManual",
@@ -1490,7 +1495,7 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   else
     lines := appendTaggedHeading lines 1 "Solution theorem" "shadow-solution-theorem"
     for entry in solutionEntries do
-      lines ← appendShadowEntryBlock env lines 2 entry
+      lines ← appendShadowEntryBlock env lines 2 entry repoUrl?
   lines := appendTaggedHeading lines 1 "Trusted formalization base" "shadow-trusted-formalization-base"
   lines := lines.push "These declarations were selected by the trusted-base walk rooted at the comparator theorem statements."
   lines := lines.push ""
@@ -1509,7 +1514,7 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
       if currentLayer? != some layer then
         currentLayer? := some layer
         lines := appendTaggedHeading lines 2 s!"Dependency layer {layer}" (shadowTagForLayer layer)
-      lines ← appendShadowEntryBlock env lines 3 entry
+      lines ← appendShadowEntryBlock env lines 3 entry repoUrl?
   pure <| String.intercalate "\n" lines.toList
 
 private def renderComparatorManualMain : String :=
@@ -1636,7 +1641,17 @@ private def renderComparatorManualSupport : String :=
     "def collapsibleProof.descr : BlockDescr where",
     "  traverse _ _ _ := pure none",
     "  toTeX := none",
-    "  extraCss := [\"details.collapsible-proof > summary { cursor: pointer; color: var(--verso-structure-fg-color, #666); font-style: italic; margin: 0.3em 0; user-select: none; }\"]",
+    "  extraCss := [",
+    "    -- Warm academic theme from the exposition site",
+    "    \":root { --site-ink: #193428; --site-muted: #5a655f; --site-warm: #fbf7ef; --site-card: #fffdf8; --site-accent: #a14d2a; --site-border: #d8cdbd; --verso-structure-color: #154734; --verso-toc-background-color: #f4efe5; --verso-selected-color: #f0dcc8; --verso-text-font-family: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif; --verso-structure-font-family: 'Avenir Next Condensed', 'Gill Sans', sans-serif; --verso-code-font-family: 'Iosevka Term', 'JetBrains Mono', monospace; }\",",
+    "    \"body { color: var(--site-ink); }\",",
+    "    -- Code block styling",
+    "    \".hl.lean.block { background: #faf4e8; border: 1px solid #eadfcf; border-radius: 10px; padding: 0.85rem 1rem; box-shadow: inset 0 1px 0 rgba(255,255,255,0.7); }\",",
+    "    -- Collapsible proof styling",
+    "    \"details.collapsible-proof > summary { cursor: pointer; color: var(--site-muted, #666); font-style: italic; margin: 0.3em 0; user-select: none; font-family: var(--verso-structure-font-family, sans-serif); font-size: 0.88rem; }\",",
+    "    \"details.collapsible-proof > summary:hover { color: var(--site-accent, #a14d2a); }\",",
+    "    -- Section heading accents",
+    "    \"main section > h2, main section > h3, main section > h4 { border-left: 4px solid var(--verso-structure-color, #154734); padding-left: 0.6rem; }\"]",
     "  toHtml := some fun _goI goB _id _data blocks => do",
     "    let inner ← blocks.mapM (goB ·)",
     "    pure {{ <details class=\"collapsible-proof\"><summary>\"Show proof\"</summary>{{inner}}</details> }}",
@@ -1706,9 +1721,9 @@ private def renderComparatorManualSupport : String :=
   ]
 
 private def writeComparatorManualFiles (env : Environment) (shadowDir : System.FilePath) (tfbInfo : TrustedBaseInfo)
-    (entries : Array ShadowEntry) : IO Unit := do
+    (entries : Array ShadowEntry) (repoUrl? : Option String := none) : IO Unit := do
   IO.FS.writeFile (shadowDir / s!"{comparatorManualSupportModule}.lean") renderComparatorManualSupport
-  IO.FS.writeFile (shadowDir / s!"{comparatorManualModule}.lean") (← renderComparatorManual env tfbInfo entries)
+  IO.FS.writeFile (shadowDir / s!"{comparatorManualModule}.lean") (← renderComparatorManual env tfbInfo entries repoUrl?)
   IO.FS.writeFile (shadowDir / s!"{comparatorManualMainModule}.lean") renderComparatorManualMain
 
 private def insertBeforeMarkerOrAppend (contents marker block : String) : String :=
@@ -1860,7 +1875,7 @@ private def buildShadowSite (shadowDir : System.FilePath) : IO Unit := do
 
 private unsafe def writeComparatorShadow (projectDir shadowDir : System.FilePath)
     (rootPrefix : Name) (env : Environment) (tfbInfo : TrustedBaseInfo)
-    (entries : Array ShadowEntry) : IO Unit := do
+    (entries : Array ShadowEntry) (repoUrl? : Option String := none) : IO Unit := do
   if ← shadowDir.pathExists then
     clearShadowDirPreservingLake shadowDir
   else
@@ -1873,7 +1888,7 @@ private unsafe def writeComparatorShadow (projectDir shadowDir : System.FilePath
   copyShadowConfigFiles projectDir shadowDir
   ensureVersoInShadowProject shadowDir
   writeShadowManifest shadowDir tfbInfo entries
-  writeComparatorManualFiles env shadowDir tfbInfo entries
+  writeComparatorManualFiles env shadowDir tfbInfo entries repoUrl?
   buildShadowSite shadowDir
 
 private def collectDecls (projectDir : System.FilePath) (rootPrefix : Name)
@@ -3515,7 +3530,7 @@ unsafe def mainImpl (args : List String) : IO UInt32 := do
         return 1
     | some _ =>
         let entries ← loadShadowEntries cfg.projectDir rootPrefix ws.root env (selectedShadowTags tfbInfo)
-        writeComparatorShadow cfg.projectDir shadowDir rootPrefix env tfbInfo entries
+        writeComparatorShadow cfg.projectDir shadowDir rootPrefix env tfbInfo entries cfg.repoUrl
         IO.println s!"Wrote {entries.size} anchored declarations to {shadowDir}"
         IO.println s!"Manifest: {shadowManifestPath shadowDir}"
         IO.println s!"Shadow site: {shadowSiteIndexPath shadowDir}"
