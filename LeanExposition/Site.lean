@@ -1506,37 +1506,40 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     "",
     s!"#doc (Manual) \"{comparator.solutionModule} Comparator Manual\" =>",
     "",
+    "# Overview",
+    "",
     "This manual presents the comparator view of the formalization.",
     s!"It was generated mechanically from the trusted formalization base walk rooted at the comparator target theorem in `{comparator.solutionModule}`.",
     s!"The formalization covers *{entries.size}* declarations across *{moduleCounts.size}* modules.",
     ""
   ]
-  -- Solution theorem
+  -- Solution theorem (## stays on overview page)
   if !solutionEntries.isEmpty then
     for entry in solutionEntries do
-      lines ← appendShadowEntryBlock env lines 1 entry repoUrl?
-  -- Dependency graph
+      lines ← appendShadowEntryBlock env lines 2 entry repoUrl?
+  -- Dependency graph (## stays on overview page)
   let graphData := buildShadowGraphData entries
   let graphJson := Json.compress (ToJson.toJson graphData)
-  lines := appendTaggedHeading lines 1 "Dependency graph" "shadow-dependency-graph"
-  lines := lines.push "Interactive force-directed visualization of the trusted formalization base. Click a node to navigate to its declaration."
+  lines := lines.push "## Dependency graph"
+  lines := lines.push ""
+  lines := lines.push "Click a node to navigate to its declaration."
   lines := lines.push ""
   let graphFence := codeFenceFor graphJson
   lines := lines.push s!"{graphFence}graphEmbed"
   lines := lines.push graphJson
   lines := lines.push graphFence
   lines := lines.push ""
-  -- Module pages: each module is a top-level section
+  -- Module pages: each # creates a separate page
   let allEntries := solutionEntries ++ tfbOnlyEntries
   let mut byModule : Std.HashMap Name (Array ShadowEntry) := {}
   for entry in allEntries do
     byModule := byModule.insert entry.moduleName ((byModule.getD entry.moduleName #[]).push entry)
   let sortedModules := byModule.toArray.qsort (fun a b => a.1.lt b.1)
   for (modName, modEntries) in sortedModules do
-    let tag := shadowTagForModule modName
     let kinds := modEntries.map (·.kind.label) |>.toList.eraseDups
     let kindSummary := String.intercalate ", " kinds
-    lines := appendTaggedHeading lines 1 s!"`{modName}`" tag
+    lines := lines.push s!"# `{modName}`"
+    lines := lines.push ""
     lines := lines.push s!"*{modEntries.size}* declarations ({kindSummary})"
     lines := lines.push ""
   pure <| String.intercalate "\n" lines.toList
