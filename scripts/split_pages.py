@@ -98,16 +98,52 @@ def split_html(html_dir):
         h = re.sub(r'<base href="[^"]*">', f'<base href="{prefix}">', h)
         return h
 
-    # Build a simple TOC sidebar for the split pages
-    toc_items = []
+    # Extract the original Verso TOC from the single-page HTML and rewrite
+    # its links to point to the split page slugs
+    toc_match = re.search(r'(<nav id="toc">[\s\S]*?</nav>)', html)
+    original_toc = toc_match.group(1) if toc_match else ''
+
+    # Rewrite TOC links: Verso generates "Overview/#fragment" style links.
+    # Replace them with our slug-based paths.
+    def make_toc(prefix=''):
+        toc = original_toc
+        for sect in sections:
+            # Verso uses the title with dots replaced by ___ as the directory name
+            # Find any href that contains the section's h2 id and rewrite it
+            # Just replace all hrefs that point to Verso-generated directories
+            toc = re.sub(
+                r'href="[^"]*#[^"]*' + re.escape(sect['slug'].replace('-', '[_-]?').replace('.', '[._]?')) + r'[^"]*"',
+                f'href="{prefix}{sect["slug"]}/"',
+                toc
+            )
+        return toc
+
+    # Simpler approach: extract original TOC table rows and rebuild with our slugs
+    toc_rows = []
     for i, sect in enumerate(sections):
-        toc_items.append(f'<li><a href="../{sect["slug"]}/">{i+1}. {sect["title"]}</a></li>')
-    simple_toc = (
-        '<nav id="toc"><div class="first">'
-        '<ul class="split-toc">' + ''.join(toc_items) + '</ul>'
-        '</div></nav>'
-    )
-    simple_toc_landing = simple_toc.replace('../', '')
+        toc_rows.append(
+            f'<tr class="numbered"><td class="num">{i+1}.</td>'
+            f'<td><a href="{{prefix}}{sect["slug"]}/">{sect["title"]}</a></td></tr>'
+        )
+    toc_table = ''.join(toc_rows)
+
+    def build_toc(prefix='', current_slug=''):
+        rows = []
+        for i, sect in enumerate(sections):
+            cls = ' class="current"' if sect['slug'] == current_slug else ''
+            rows.append(
+                f'<tr class="numbered"{cls}><td class="num">{i+1}.</td>'
+                f'<td><a href="{prefix}{sect["slug"]}/">{sect["title"]}</a></td></tr>'
+            )
+        return (
+            '<nav id="toc">'
+            '<input type="checkbox" id="toggle-toc">'
+            '<div class="first">'
+            '<div class="split-tocs"><div class="split-toc book">'
+            '<div class="title"><span>Table of Contents</span></div>'
+            '<table>' + ''.join(rows) + '</table>'
+            '</div></div></div></nav>'
+        )
 
     # Create sub-pages for all sections except the first (Overview = landing)
     for i, sect in enumerate(sections):
@@ -116,10 +152,7 @@ def split_html(html_dir):
         page_dir = Path(html_dir) / sect['slug']
         page_dir.mkdir(exist_ok=True)
         sub_head = fix_paths(head)
-        sub_toc = simple_toc.replace(
-            f'<a href="../{sect["slug"]}/"',
-            f'<a class="current" href="../{sect["slug"]}/"'
-        )
+        sub_toc = build_toc(prefix='../', current_slug=sect['slug'])
         page = (
             f'<!DOCTYPE html>\n<html>\n{sub_head}\n<body>\n'
             f'<header><div class="header-title-wrapper">'
@@ -134,10 +167,7 @@ def split_html(html_dir):
 
     # Landing page = Overview section with full chrome
     overview = sections[0]
-    landing_toc = simple_toc_landing.replace(
-        f'<a href="{overview["slug"]}/"',
-        f'<a class="current" href="{overview["slug"]}/"'
-    )
+    landing_toc = build_toc(prefix='', current_slug=overview['slug'])
     landing = (
         f'<!DOCTYPE html>\n<html>\n{head}\n<body>\n'
         f'<header><div class="header-title-wrapper">'
