@@ -149,7 +149,11 @@ def split_html(html_dir):
             '<input type="checkbox" id="toggle-toc">'
             '<div class="first">'
             '<div class="split-tocs"><div class="split-toc book">'
-            '<div class="title"><span>Table of Contents</span></div>'
+            '<div class="title">'
+            '<label for="--split-toc-toggle" class="toggle-split-toc">'
+            '<input type="checkbox" class="toggle-split-toc" id="--split-toc-toggle" checked="checked">'
+            '</label>'
+            '<span>Table of Contents</span></div>'
             '<table>' + ''.join(rows) + '</table>'
             '</div></div></div></nav>'
         )
