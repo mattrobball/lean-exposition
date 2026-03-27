@@ -102,7 +102,8 @@ def split_html(html_dir):
         h = re.sub(r'href="(verso-vars\.css)"', f'href="{prefix}\\1"', h)
         h = re.sub(r'href="(-verso[^"]*)"', f'href="{prefix}\\1"', h)
         h = re.sub(r'src="(-verso[^"]*)"', f'src="{prefix}\\1"', h)
-        h = re.sub(r'<base href="[^"]*">', f'<base href="{prefix}">', h)
+        # Remove <base> tag — we fix paths explicitly so base would double-prefix
+        h = re.sub(r'<base href="[^"]*">', '', h)
         return h
 
     # Extract the original Verso TOC from the single-page HTML and rewrite
