@@ -1416,8 +1416,7 @@ private def renderShadowCodeBlock (entry : ShadowEntry) (snippet : String) : Arr
   let fence := codeFenceFor snippet
   let defSite := if hasShadowTag entry "tfb" then " -defSite" else ""
   let proofKind := entry.kind == .theorem || entry.kind == .opaque || entry.kind == .instance
-  let blockType :=
-    if hasShadowTag entry "tfb" && proofKind then "collapsibleModule" else "module"
+  let blockType := if proofKind then "collapsibleModule" else "module"
   let config := s!"{fence}{blockType} (module := {entry.moduleName}) (anchor := {entry.anchor}){defSite}"
   #[
     config,
@@ -1465,6 +1464,15 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     entries.filter fun entry => hasShadowTag entry "solution"
   let tfbEntries :=
     entries.filter fun entry => hasShadowTag entry "tfb"
+  let solutionNames : Std.HashSet Name :=
+    solutionEntries.foldl (fun acc entry => acc.insert entry.name) {}
+  let tfbOnlyEntries :=
+    tfbEntries.filter fun entry => !solutionNames.contains entry.name
+  -- Collect per-module declaration counts for the overview
+  let mut moduleCounts : Std.HashMap Name Nat := {}
+  for entry in tfbOnlyEntries do
+    moduleCounts := moduleCounts.insert entry.moduleName ((moduleCounts.getD entry.moduleName 0) + 1)
+  let moduleList := moduleCounts.toArray.qsort (fun a b => a.1.lt b.1)
   let mut lines : Array String := #[
     "import VersoManual",
     s!"import {comparator.solutionModule}",
@@ -1483,30 +1491,44 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     "htmlSplit := .never",
     "%%%",
     "",
-    "This manual was generated mechanically from the comparator configuration and the trusted formalization base walk.",
+    -- Overview section
+    "# Overview",
+    "%%%",
+    "tag := \"shadow-overview\"",
+    "%%%",
     "",
-    s!"The comparator target theorem is rendered from `{comparator.solutionModule}`.",
+    "This manual presents the comparator view of the formalization.",
+    s!"It was generated mechanically from the trusted formalization base walk rooted at the comparator target theorem in `{comparator.solutionModule}`.",
+    "",
+    s!"The manual covers *{entries.size}* declarations: *{solutionEntries.size}* solution theorem(s) and *{tfbOnlyEntries.size}* trusted-base declarations across *{moduleCounts.size}* modules.",
     ""
   ]
+  -- Module summary table
+  if !moduleList.isEmpty then
+    lines := lines.push "| Module | Declarations |"
+    lines := lines.push "|--------|-------------|"
+    for (mod, count) in moduleList do
+      lines := lines.push s!"| `{mod}` | {count} |"
+    lines := lines.push ""
+  -- Solution theorem section
   if solutionEntries.isEmpty then
     lines := appendTaggedHeading lines 1 "Solution theorem" "shadow-solution-theorem"
     lines := lines.push "No solution theorem declarations were resolved from the comparator configuration."
     lines := lines.push ""
   else
     lines := appendTaggedHeading lines 1 "Solution theorem" "shadow-solution-theorem"
+    lines := lines.push s!"The comparator target theorem is rendered from `{comparator.solutionModule}`."
+    lines := lines.push ""
     for entry in solutionEntries do
       lines ← appendShadowEntryBlock env lines 2 entry repoUrl?
+  -- Trusted formalization base section
   lines := appendTaggedHeading lines 1 "Trusted formalization base" "shadow-trusted-formalization-base"
-  lines := lines.push "These declarations were selected by the trusted-base walk rooted at the comparator theorem statements."
+  lines := lines.push "These are the exposed declarations a reader must trust in order to accept the comparator-facing theorem."
   lines := lines.push ""
-  if tfbEntries.isEmpty then
+  if tfbOnlyEntries.isEmpty then
     lines := lines.push "No trusted-base declarations were resolved."
     lines := lines.push ""
   else
-    let solutionNames : Std.HashSet Name :=
-      solutionEntries.foldl (fun acc entry => acc.insert entry.name) {}
-    let tfbOnlyEntries :=
-      tfbEntries.filter fun entry => !solutionNames.contains entry.name
     let layerMap := shadowLayerMapFromOrderedEntries tfbOnlyEntries
     let mut currentLayer? : Option Nat := none
     for entry in tfbOnlyEntries do
