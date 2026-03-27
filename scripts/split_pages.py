@@ -59,6 +59,10 @@ def split_html(html_dir):
 
     print(f"Found {len(sections)} sections")
 
+    # Extract the manual title from the original header
+    manual_title_match = re.search(r'<a[^>]*class="header-title"[^>]*><h1>\s*(.*?)\s*</h1>', html, re.DOTALL)
+    manual_title = re.sub(r'<[^>]+>', '', manual_title_match.group(1)).strip() if manual_title_match else sections[0]['title']
+
     # Save original
     (Path(html_dir) / 'index-full.html').write_text(html)
 
@@ -170,7 +174,7 @@ def split_html(html_dir):
             f'<!DOCTYPE html>\n<html>\n{sub_head}\n<body>\n'
             f'<header><div class="header-logo-wrapper"></div>'
             f'<div class="header-title-wrapper">'
-            f'<a href="../" class="header-title"><h1>{sections[0]["title"]}</h1></a>'
+            f'<a href="../" class="header-title"><h1>{manual_title}</h1></a>'
             f'</div></header>\n'
             f'{burger}'
             f'<div class="with-toc">\n'
@@ -190,7 +194,7 @@ def split_html(html_dir):
         f'<!DOCTYPE html>\n<html>\n{head}\n<body>\n'
         f'<header><div class="header-logo-wrapper"></div>'
         f'<div class="header-title-wrapper">'
-        f'<a href="" class="header-title"><h1>{overview["title"]}</h1></a>'
+        f'<a href="" class="header-title"><h1>{manual_title}</h1></a>'
         f'</div></header>\n'
         f'{burger}'
         f'<div class="with-toc">\n'
