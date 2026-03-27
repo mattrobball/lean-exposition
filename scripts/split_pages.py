@@ -127,6 +127,15 @@ def split_html(html_dir):
         )
     toc_table = ''.join(toc_rows)
 
+    # The burger toggle that shows/hides the sidebar
+    burger = (
+        '<label for="toggle-toc" id="toggle-toc-click">'
+        '<span class="line line1"></span>'
+        '<span class="line line2"></span>'
+        '<span class="line line3"></span>'
+        '</label>'
+    )
+
     def build_toc(prefix='', current_slug=''):
         rows = []
         for i, sect in enumerate(sections):
@@ -158,6 +167,7 @@ def split_html(html_dir):
             f'<header><div class="header-title-wrapper">'
             f'<a href="../" class="header-title"><h1>{sections[0]["title"]}</h1></a>'
             f'</div></header>\n'
+            f'{burger}\n'
             f'<div class="with-toc">{sub_toc}\n<main>\n'
             f'<div class="content-wrapper">\n{sect["html"]}\n</div>\n'
             f'</main></div>\n</body>\n</html>'
@@ -173,6 +183,7 @@ def split_html(html_dir):
         f'<header><div class="header-title-wrapper">'
         f'<a href="" class="header-title"><h1>{overview["title"]}</h1></a>'
         f'</div></header>\n'
+        f'{burger}\n'
         f'<div class="with-toc">{landing_toc}\n<main>\n'
         f'<div class="content-wrapper">\n{overview["html"]}\n</div>\n'
         f'</main></div>\n</body>\n</html>'
