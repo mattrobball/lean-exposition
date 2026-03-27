@@ -1451,7 +1451,9 @@ private def buildShadowGraphData (entries : Array ShadowEntry) : GraphData := Id
     status := "clean"
     groupKey := entry.moduleName.toString
     moduleName := entry.moduleName.toString
-    href := s!"#shadow-entry-{slugify entry.moduleName.toString}-{slugify entry.name.toString}-{entry.source.line}-{entry.source.endLine}"
+    -- Link to the split module page. The module slug matches what split_pages.py generates.
+    href := let modSlug := slugify (entry.moduleName.toString.dropPrefix "BridgelandStability.").toString
+            s!"{modSlug}/"
   }
   let mut edges : Array GraphEdge := #[]
   for entry in entries do
@@ -1504,7 +1506,8 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     "set_option maxHeartbeats 2000000",
     "set_option verso.exampleProject \".\"",
     "",
-    s!"#doc (Manual) \"{comparator.solutionModule} Comparator Manual\" =>",
+    let targetName := comparator.theoremNames[0]?.map (·.getString!) |>.getD comparator.solutionModule
+    s!"#doc (Manual) \"{targetName} Comparator Manual\" =>",
     "%%%",
     "htmlSplit := .never",
     "%%%",
