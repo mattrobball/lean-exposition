@@ -95,15 +95,10 @@ def split_html(html_dir):
             return m.group(0)
         return re.sub(r'href="([^"]*)"', rewrite_link, chrome)
 
-    def fix_paths(h, depth=1):
-        """Fix asset paths for sub-pages."""
-        prefix = '../' * depth
-        h = re.sub(r'href="(book\.css)"', f'href="{prefix}\\1"', h)
-        h = re.sub(r'href="(verso-vars\.css)"', f'href="{prefix}\\1"', h)
-        h = re.sub(r'href="(-verso[^"]*)"', f'href="{prefix}\\1"', h)
-        h = re.sub(r'src="(-verso[^"]*)"', f'src="{prefix}\\1"', h)
-        # Remove <base> tag — we fix paths explicitly so base would double-prefix
-        h = re.sub(r'<base href="[^"]*">', '', h)
+    def fix_paths_for_subpage(h):
+        """Set <base href="../"> so all relative paths resolve from root.
+        No explicit ../ prefixes needed — base handles it."""
+        h = re.sub(r'<base href="[^"]*">', '<base href="../">', h)
         return h
 
     # Extract the original Verso TOC from the single-page HTML and rewrite
@@ -134,6 +129,12 @@ def split_html(html_dir):
             f'<td><a href="{{prefix}}{sect["slug"]}/">{sect["title"]}</a></td></tr>'
         )
     toc_table = ''.join(toc_rows)
+
+    # Extract inline scripts from the body (between </head><body> and first section)
+    # These include the TOC toggle JS, Tippy init, SubVerso hover code
+    body_start = html.find('<body>') + len('<body>')
+    pre_section = html[body_start:first_section.start()]
+    inline_scripts = ''.join(re.findall(r'(<script>[\s\S]*?</script>)', pre_section))
 
     # The burger toggle that shows/hides the sidebar
     burger = (
@@ -178,7 +179,7 @@ def split_html(html_dir):
             continue  # Overview becomes the landing page
         page_dir = Path(html_dir) / sect['slug']
         page_dir.mkdir(exist_ok=True)
-        sub_head = fix_paths(head)
+        sub_head = fix_paths_for_subpage(head)
         sub_toc = build_toc(prefix='../', current_slug=sect['slug'])
         page = (
             f'<!DOCTYPE html>\n<html>\n{sub_head}\n<body>\n'
@@ -192,7 +193,7 @@ def split_html(html_dir):
             f'{sub_toc}\n'
             f'<main><div class="content-wrapper">\n'
             f'{sect["html"]}\n'
-            f'</div></main></div>\n</body>\n</html>'
+            f'</div></main></div>\n{inline_scripts}\n</body>\n</html>'
         )
         (page_dir / 'index.html').write_text(page)
         print(f"  {sect['slug']}/index.html ({len(sect['html'])} bytes)")
@@ -212,7 +213,7 @@ def split_html(html_dir):
         f'{landing_toc}\n'
         f'<main><div class="content-wrapper">\n'
         f'{overview["html"]}\n'
-        f'</div></main></div>\n</body>\n</html>'
+        f'</div></main></div>\n{inline_scripts}\n</body>\n</html>'
     )
     html_path.write_text(landing)
     print(f"  index.html (Overview landing, {len(overview['html'])} bytes)")
