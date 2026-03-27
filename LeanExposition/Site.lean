@@ -1695,6 +1695,7 @@ private def renderComparatorManualSupport : String :=
     "    \"details.collapsible-proof > summary:hover { color: var(--site-accent, #a14d2a); }\",",
     "    -- Section heading accents",
     "    \"main section > h2, main section > h3, main section > h4 { border-left: 4px solid var(--verso-structure-color, #154734); padding-left: 0.6rem; }\"]",
+    "  extraJs := [\"document.addEventListener('DOMContentLoaded',function(){document.querySelectorAll('nav a[href], .toc a[href], a.local-button[href]').forEach(function(a){var h=a.getAttribute('href');if(!h)return;var i=h.indexOf('#');if(i>0){var frag=h.slice(i);if(document.querySelector(frag)){a.setAttribute('href',frag)}}})})\"]",
     "  toHtml := some fun _goI goB _id _data blocks => do",
     "    let inner ← blocks.mapM (goB ·)",
     "    pure {{ <details class=\"collapsible-proof\"><summary>\"Show proof\"</summary>{{inner}}</details> }}",
