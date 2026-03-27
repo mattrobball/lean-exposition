@@ -145,15 +145,16 @@ def split_html(html_dir):
         '</label>'
     )
 
-    def build_toc(prefix='', current_slug=''):
+    def build_toc(is_subpage=False, current_slug=''):
+        """Build TOC. On sub-pages, <base href="../"> is set so all hrefs
+        are relative to the site root — use slug/ directly, ./ for root."""
         rows = []
         for i, sect in enumerate(sections):
             cls = ' class="current"' if sect['slug'] == current_slug else ''
-            # Overview (first section) links to root, not overview/
             if i == 0:
-                href = f'{prefix}' if prefix else './'
+                href = './'  # Overview = site root
             else:
-                href = f'{prefix}{sect["slug"]}/'
+                href = f'{sect["slug"]}/'
             rows.append(
                 f'<tr class="numbered"{cls}><td class="num">{i+1}.</td>'
                 f'<td><a href="{href}">{sect["title"]}</a></td></tr>'
@@ -162,7 +163,7 @@ def split_html(html_dir):
             '<nav id="toc">'
             '<input type="checkbox" id="toggle-toc">'
             '<div class="first">'
-            f'<a href="{prefix}" class="toc-title"><h1>{manual_title}</h1></a>'
+            f'<a href="./" class="toc-title"><h1>{manual_title}</h1></a>'
             '<div class="split-tocs"><div class="split-toc book">'
             '<div class="title">'
             '<label for="--split-toc-toggle" class="toggle-split-toc">'
@@ -180,12 +181,12 @@ def split_html(html_dir):
         page_dir = Path(html_dir) / sect['slug']
         page_dir.mkdir(exist_ok=True)
         sub_head = fix_paths_for_subpage(head)
-        sub_toc = build_toc(prefix='../', current_slug=sect['slug'])
+        sub_toc = build_toc(is_subpage=True, current_slug=sect['slug'])
         page = (
             f'<!DOCTYPE html>\n<html>\n{sub_head}\n<body>\n'
             f'<header><div class="header-logo-wrapper"></div>'
             f'<div class="header-title-wrapper">'
-            f'<a href="../" class="header-title"><h1>{manual_title}</h1></a>'
+            f'<a href="./" class="header-title"><h1>{manual_title}</h1></a>'
             f'</div></header>\n'
             f'{burger}'
             f'<div class="with-toc">\n'
@@ -200,7 +201,7 @@ def split_html(html_dir):
 
     # Landing page = Overview section with full chrome
     overview = sections[0]
-    landing_toc = build_toc(prefix='', current_slug=overview['slug'])
+    landing_toc = build_toc(is_subpage=False, current_slug=overview['slug'])
     landing = (
         f'<!DOCTYPE html>\n<html>\n{head}\n<body>\n'
         f'<header><div class="header-logo-wrapper"></div>'
