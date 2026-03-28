@@ -3650,6 +3650,25 @@ private def mkRootPart (cfg : Cli) (rootPrefix : Name) (groups : Array GroupInfo
       ++ #[mkGraphPart decls declHrefs]
   }
 
+private def detectRepoUrl (projectDir : System.FilePath) : IO (Option String) := do
+  let result ← IO.Process.output {
+    cmd := "git"
+    args := #["remote", "get-url", "origin"]
+    cwd := some projectDir
+  }
+  if result.exitCode != 0 then return none
+  let url := result.stdout.trim
+  if url.isEmpty then return none
+  -- Convert SSH URLs (git@github.com:owner/repo.git) to HTTPS
+  if url.startsWith "git@" then
+    let url := url.stripPrefix "git@"
+    let url := url.replace ":" "/"
+    let url := if url.endsWith ".git" then url.dropRight 4 else url
+    return some s!"https://{url}"
+  -- Strip trailing .git from HTTPS URLs
+  let url := if url.endsWith ".git" then url.dropRight 4 else url
+  return some url
+
 private def withCurrentDir {α : Type} (dir : System.FilePath) (act : IO α) : IO α := do
   let cwd ← IO.Process.getCurrentDir
   IO.Process.setCurrentDir dir
@@ -3697,6 +3716,11 @@ unsafe def mainImpl (args : List String) : IO UInt32 := do
     | .error err =>
         IO.eprintln err
         return 1
+  let cfg ← do
+    if cfg.repoUrl.isSome then pure cfg
+    else
+      let detected ← detectRepoUrl cfg.projectDir
+      pure { cfg with repoUrl := detected }
   let ws ← loadWorkspaceAt cfg.projectDir
   let some rootPrefix := cfg.rootPrefix <|> firstRootPrefix ws cfg.excludeLibs
     | IO.eprintln "Could not determine a root module prefix. Pass --root PREFIX."
