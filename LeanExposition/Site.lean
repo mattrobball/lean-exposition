@@ -3634,6 +3634,9 @@ private def mkRootPart (cfg : Cli) (rootPrefix : Name) (groups : Array GroupInfo
       number := false
     }
     content := #[.para #[.text "Auto-generated exposition for ", .code rootPrefix.toString, .text "."]]
+      ++ (match cfg.repoUrl with
+          | some url => #[.para #[.text "Repository: ", .link #[.code url] url]]
+          | none => #[])
       ++ introBlocks
       ++ readerGuideBlocks
       ++ mkDashboardBlocks groups
