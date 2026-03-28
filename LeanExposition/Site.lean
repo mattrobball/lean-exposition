@@ -3657,16 +3657,16 @@ private def detectRepoUrl (projectDir : System.FilePath) : IO (Option String) :=
     cwd := some projectDir
   }
   if result.exitCode != 0 then return none
-  let url := result.stdout.trim
+  let url := result.stdout.trimAscii.toString
   if url.isEmpty then return none
   -- Convert SSH URLs (git@github.com:owner/repo.git) to HTTPS
   if url.startsWith "git@" then
-    let url := url.stripPrefix "git@"
+    let url := (url.dropPrefix "git@").toString
     let url := url.replace ":" "/"
-    let url := if url.endsWith ".git" then url.dropRight 4 else url
+    let url := if url.endsWith ".git" then (url.dropEnd 4).toString else url
     return some s!"https://{url}"
   -- Strip trailing .git from HTTPS URLs
-  let url := if url.endsWith ".git" then url.dropRight 4 else url
+  let url := if url.endsWith ".git" then (url.dropEnd 4).toString else url
   return some url
 
 private def withCurrentDir {α : Type} (dir : System.FilePath) (act : IO α) : IO α := do
