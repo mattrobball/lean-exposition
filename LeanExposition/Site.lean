@@ -1515,7 +1515,12 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     "# Overview",
     "",
     "![comparator](badge/comparator.svg)",
-    "",
+    ""
+  ]
+  if let some url := repoUrl? then
+    lines := lines.push s!"Repository: [{url}]({url})"
+    lines := lines.push ""
+  lines := lines ++ #[
     "This manual presents the comparator view of the formalization.",
     s!"It was generated mechanically from the trusted formalization base walk rooted at the comparator target theorem in `{comparator.solutionModule}`.",
     s!"The formalization covers *{entries.size}* declarations across *{moduleCounts.size}* modules.",
