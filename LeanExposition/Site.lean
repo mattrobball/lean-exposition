@@ -1441,6 +1441,10 @@ private def appendShadowEntryBlock (_env : Environment) (lines : Array String) (
         ""
       ]
       ++ renderShadowCodeBlock entry snippet
+      ++ #[
+        s!"\{docstring {entry.name} (allowMissing := true)}",
+        ""
+      ]
 
 private def buildShadowGraphData (entries : Array ShadowEntry) : GraphData := Id.run do
   let entryNames : Std.HashSet Name := entries.foldl (fun s e => s.insert e.name) {}
