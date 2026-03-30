@@ -184,17 +184,28 @@ def split_html(html_dir):
             # Overview (first section) is at root
             id_to_slug[anchor_id] = sections[0]['slug'] if sect is sections[0] else sect['slug']
 
-    def rewrite_cross_links(page_html, page_slug):
-        """Rewrite fragment-only links that point to other pages."""
+    def rewrite_cross_links(page_html, page_slug, is_subpage=False):
+        """Rewrite fragment-only links.
+        On sub-pages with <base href="../">, ALL #fragment links resolve from
+        the root, not the current page. So even same-page links need an
+        explicit slug/ prefix to route back to the current page."""
         def rewrite(m):
             href = m.group(1)
             if not href.startswith('#'):
                 return m.group(0)
             anchor = href[1:]
             target_slug = id_to_slug.get(anchor)
-            if target_slug is None or target_slug == page_slug:
-                return m.group(0)  # same page or unknown — leave as-is
-            # Sub-pages have <base href="../"> so slug/ resolves from root
+            if target_slug is None:
+                if is_subpage:
+                    # Unknown anchor on sub-page: add explicit self-reference
+                    return f'href="{page_slug}/#{anchor}"'
+                return m.group(0)
+            # All sub-page links need explicit slug/ due to <base href="../">
+            if is_subpage:
+                return f'href="{target_slug}/#{anchor}"'
+            # Landing page: same-page fragments are fine, cross-page need slug
+            if target_slug == page_slug:
+                return m.group(0)
             return f'href="{target_slug}/#{anchor}"'
         return re.sub(r'href="(#[^"]*)"', rewrite, page_html)
 
@@ -220,7 +231,7 @@ def split_html(html_dir):
             f'{sect["html"]}\n'
             f'</div></main></div>\n{inline_scripts}\n</body>\n</html>'
         )
-        page = rewrite_cross_links(page, sect['slug'])
+        page = rewrite_cross_links(page, sect['slug'], is_subpage=True)
         (page_dir / 'index.html').write_text(page)
         print(f"  {sect['slug']}/index.html ({len(sect['html'])} bytes)")
 
