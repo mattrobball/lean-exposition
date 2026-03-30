@@ -174,6 +174,30 @@ def split_html(html_dir):
             '</div></div></div></nav>'
         )
 
+    # Build a map of anchor IDs to page slugs for cross-page link rewriting.
+    # After splitting, href="#some-id" may point to an anchor on a different page.
+    # We rewrite those to "slug/#some-id" so they resolve correctly.
+    id_to_slug = {}
+    for sect in sections:
+        for m in re.finditer(r'id="([^"]+)"', sect['html']):
+            anchor_id = m.group(1)
+            # Overview (first section) is at root
+            id_to_slug[anchor_id] = sections[0]['slug'] if sect is sections[0] else sect['slug']
+
+    def rewrite_cross_links(page_html, page_slug):
+        """Rewrite fragment-only links that point to other pages."""
+        def rewrite(m):
+            href = m.group(1)
+            if not href.startswith('#'):
+                return m.group(0)
+            anchor = href[1:]
+            target_slug = id_to_slug.get(anchor)
+            if target_slug is None or target_slug == page_slug:
+                return m.group(0)  # same page or unknown — leave as-is
+            # Sub-pages have <base href="../"> so slug/ resolves from root
+            return f'href="{target_slug}/#{anchor}"'
+        return re.sub(r'href="(#[^"]*)"', rewrite, page_html)
+
     # Create sub-pages for all sections except the first (Overview = landing)
     for i, sect in enumerate(sections):
         if i == 0:
@@ -196,6 +220,7 @@ def split_html(html_dir):
             f'{sect["html"]}\n'
             f'</div></main></div>\n{inline_scripts}\n</body>\n</html>'
         )
+        page = rewrite_cross_links(page, sect['slug'])
         (page_dir / 'index.html').write_text(page)
         print(f"  {sect['slug']}/index.html ({len(sect['html'])} bytes)")
 
@@ -216,6 +241,7 @@ def split_html(html_dir):
         f'{overview["html"]}\n'
         f'</div></main></div>\n{inline_scripts}\n</body>\n</html>'
     )
+    landing = rewrite_cross_links(landing, overview['slug'])
     html_path.write_text(landing)
     print(f"  index.html (Overview landing, {len(overview['html'])} bytes)")
 

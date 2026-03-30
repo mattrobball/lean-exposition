@@ -1438,6 +1438,8 @@ private def appendShadowEntryBlock (_env : Environment) (lines : Array String) (
     (appendTaggedHeading lines level s!"`{entry.name}`" (shadowTagForEntry entry))
       ++ #[
         s!"`{entry.kind.label}` | `{entry.moduleName}`{sourceLink}{issueLink}",
+        "",
+        s!"\{docstring {entry.name} (allowMissing := true)}",
         ""
       ]
       ++ renderShadowCodeBlock entry snippet
