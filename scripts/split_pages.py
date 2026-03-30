@@ -55,8 +55,9 @@ def split_html(html_dir):
         title = title.replace('\U0001f517', '').strip()
         title = re.sub(r'^\d+\.\s*', '', title)
 
-        # Strip Verso's prev-next nav and section-toc (they have old unsplit links)
+        # Strip Verso's prev-next nav, section-toc, and its heading (old unsplit links)
         chunk = re.sub(r'<nav class="prev-next-buttons">[\s\S]*?</nav>', '', chunk)
+        chunk = re.sub(r'<h2[^>]*>\s*Contents[\s\S]*?</h2>\s*<ol class="section-toc">[\s\S]*?</ol>', '', chunk)
         chunk = re.sub(r'<ol class="section-toc">[\s\S]*?</ol>', '', chunk)
         sections.append({'title': title, 'slug': slugify(title), 'html': chunk})
 
@@ -65,6 +66,18 @@ def split_html(html_dir):
     # Extract the manual title from the original header
     manual_title_match = re.search(r'<a[^>]*class="header-title"[^>]*><h1>\s*(.*?)\s*</h1>', html, re.DOTALL)
     manual_title = re.sub(r'<[^>]+>', '', manual_title_match.group(1)).strip() if manual_title_match else sections[0]['title']
+
+    # Generate a placeholder badge if one doesn't exist (CI generates the real one)
+    badge_dir = Path(html_dir) / 'badge'
+    badge_dir.mkdir(exist_ok=True)
+    badge_svg = badge_dir / 'comparator.svg'
+    if not badge_svg.exists():
+        badge_svg.write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="140" height="20">'
+            '<rect width="140" height="20" rx="3" fill="#555"/>'
+            '<g fill="#fff" text-anchor="middle" font-family="sans-serif" font-size="11">'
+            '<text x="70" y="14">comparator: local</text></g></svg>'
+        )
 
     # Save original
     (Path(html_dir) / 'index-full.html').write_text(html)
@@ -150,13 +163,13 @@ def split_html(html_dir):
         are relative to the site root — use slug/ directly, ./ for root."""
         rows = []
         for i, sect in enumerate(sections):
-            cls = ' class="current"' if sect['slug'] == current_slug else ''
+            cls = 'numbered current' if sect['slug'] == current_slug else 'numbered'
             if i == 0:
                 href = './'  # Overview = site root
             else:
                 href = f'{sect["slug"]}/'
             rows.append(
-                f'<tr class="numbered"{cls}><td class="num">{i+1}.</td>'
+                f'<tr class="{cls}"><td class="num">{i+1}.</td>'
                 f'<td><a href="{href}">{sect["title"]}</a></td></tr>'
             )
         return (
@@ -216,6 +229,12 @@ def split_html(html_dir):
         page_dir = Path(html_dir) / sect['slug']
         page_dir.mkdir(exist_ok=True)
         sub_head = fix_paths_for_subpage(head)
+        # Set per-page title for browser tabs
+        sub_head = re.sub(
+            r'<title>[^<]*</title>',
+            f'<title>{sect["title"]} — {manual_title}</title>',
+            sub_head
+        )
         sub_toc = build_toc(is_subpage=True, current_slug=sect['slug'])
         page = (
             f'<!DOCTYPE html>\n<html>\n{sub_head}\n<body>\n'
