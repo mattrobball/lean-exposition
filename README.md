@@ -30,6 +30,46 @@ lake update
 lake build exposition
 ```
 
+## Prebuilt CI Binaries
+
+The `Publish Exposition Binary` workflow runs on pushes to `master`, on tags,
+and on manual dispatches. It builds the Linux `x86_64` binary on
+`ubuntu-latest`, then publishes an artifact named
+`exposition-linux-x86_64-$SOURCE_SHA`.
+
+Each published artifact contains:
+
+- `exposition-linux-x86_64-$SOURCE_SHA.tar.gz`
+- `exposition-linux-x86_64-$SOURCE_SHA.metadata.json`
+- `SHA256SUMS`
+
+The tarball expands to a directory containing the `exposition` binary,
+`lean-toolchain`, and the same `metadata.json` file. On tag builds, the same
+files are also attached to the corresponding GitHub release.
+
+Downstream CI can resolve the publishing run for a particular
+`lean-exposition` commit and download the matching artifact with `gh`:
+
+```bash
+SOURCE_SHA=<lean-exposition commit>
+REPO=mattrobball/lean-exposition
+RUN_ID=$(gh run list \
+  -R "$REPO" \
+  --workflow "Publish Exposition Binary" \
+  --event push \
+  --commit "$SOURCE_SHA" \
+  --status success \
+  --json databaseId \
+  --jq '.[0].databaseId')
+gh run download "$RUN_ID" \
+  -R "$REPO" \
+  -n "exposition-linux-x86_64-$SOURCE_SHA" \
+  -D ./exposition-artifact
+tar -xzf \
+  "./exposition-artifact/exposition-linux-x86_64-$SOURCE_SHA/exposition-linux-x86_64-$SOURCE_SHA.tar.gz" \
+  -C ./exposition-artifact
+```
+
 ## Run Against A Target Repo
 
 The target repo must already have current `.olean` files for the modules you
@@ -57,13 +97,32 @@ lake env /path/to/lean-exposition/.lake/build/bin/exposition \
   --root MyLibrary \
   --exclude-lib MySpec \
   --comparator-config comparator.json \
-  --tfb-exe extractDeps \
   --output /path/to/site-out
 ```
 
-If the target repo provides a comparator config plus a dependency-closure
-executable, `LeanExposition` will compute and render the trusted formalization
-base view.
+If the target repo provides a comparator config, `LeanExposition` will compute
+and render the trusted formalization base view directly from the compiled
+environment.
+
+To generate a Verso-oriented shadow project with mechanical `-- ANCHOR:` markers
+for the comparator slice and build the corresponding manual site, run:
+
+```bash
+lake env /path/to/lean-exposition/.lake/build/bin/exposition \
+  --project /path/to/target \
+  --root MyLibrary \
+  --comparator-config comparator.json \
+  --write-shadow /tmp/target-shadow \
+  --shadow-only
+```
+
+This copies the target repo to `/tmp/target-shadow`, injects anchors for the
+selected declarations, patches the shadow `lakefile` to add `verso`, removes
+the copied `lake-manifest.json`, runs `lake update`, attempts `lake exe cache
+get`, builds `comparatorManual`, and renders the manual into
+`/tmp/target-shadow/_out/html-multi/`. The generated
+`/tmp/target-shadow/exposition-shadow.json` still records the selected
+declarations and their anchors.
 
 ## Options
 
@@ -72,7 +131,9 @@ base view.
 - `--title TITLE`: override the site title
 - `--output DIR`: output directory passed through to Verso
 - `--comparator-config FILE`: comparator config file relative to the target project root
-- `--tfb-exe NAME`: Lake executable used to compute the trusted-base dependency closure
+- `--tfb-exe NAME`: deprecated; trusted-base extraction is built in
+- `--write-shadow DIR`: generate and build a shadow project with mechanical Verso anchors
+- `--shadow-only`: exit after the shadow project is built instead of also rendering the exposition site
 - `--exclude-lib NAME`: root library to skip when importing the target project
 - `--project DIR`: alternate workspace path, currently experimental
 
@@ -81,5 +142,6 @@ base view.
 - v1 still relies on plain text code blocks and source-file snippets, not SubVerso highlighting
 - undocumented declarations render without prose
 - dependency links and graph edges are only emitted for exposed declarations
-- comparator integration currently depends on a target-side comparator config and dependency-closure executable; it does not yet consume richer comparator output directly
+- comparator integration still consumes a minimal comparator config rather than richer comparator output
+- the shadow-project path is still experimental and currently mutates the generated shadow `lakefile` to add `verso`
 - issue URLs are generated from `--repo-url` and assume a standard `main` branch layout
