@@ -1103,47 +1103,6 @@ private def loadShadowEntries (projectDir : System.FilePath) (rootPrefix : Name)
       ++ flattenShadowLayers (shadowTopologicalLayers order tfbEntries)
       ++ otherEntries
 
-/-- Create ShadowEntries for theorems declared in the challenge module.
-    These reference the spec source (with `sorry`) rather than the solution module. -/
-private def loadChallengeEntries (projectDir : System.FilePath)
-    (comparator : ComparatorConfigInfo) : IO (Array ShadowEntry) := do
-  let challengeModule := comparator.challengeModule.toName
-  let relPath := moduleRelPathOfString comparator.challengeModule
-  let filePath := projectDir / relPath
-  let some contents ← readFileIfExists filePath
-    | return #[]
-  let lines := (contents.splitOn "\n").toArray
-  let absPath ← IO.FS.realPath filePath
-  let mut entries := #[]
-  for theoremName in comparator.theoremNames do
-    let shortName := theoremName.getString!
-    let some startLine := findDeclarationLine? lines shortName | continue
-    -- find end of the declaration (next blank line or end of file)
-    let mut endLine := startLine
-    for idx in List.range (lines.size - startLine) do
-      let ln := startLine + idx
-      let trimmed := (String.trimAscii lines[ln]!).toString
-      endLine := ln + 1
-      if trimmed.isEmpty && ln > startLine then
-        break
-    let source : SourceInfo := {
-      relPath
-      absPath := absPath.toString
-      line := startLine
-      endLine
-    }
-    entries := entries.push {
-      name := theoremName
-      moduleName := challengeModule
-      anchor := theoremName.toString
-      kind := .theorem
-      source
-      displaySignature := s!"theorem {shortName} ..."
-      deps := #[]
-      tags := #["challenge"]
-    }
-  return entries
-
 private def anchorStartLine (anchor : String) : String :=
   s!"-- ANCHOR: {anchor}"
 
@@ -1151,7 +1110,7 @@ private def anchorEndLine (anchor : String) : String :=
   s!"-- ANCHOR_END: {anchor}"
 
 private def shouldDropProofInShadow (entry : ShadowEntry) : Bool :=
-  (entry.tags.contains "tfb" || entry.tags.contains "challenge")
+  entry.tags.contains "tfb"
     && (entry.kind == .theorem || entry.kind == .opaque || entry.kind == .instance)
 
 private def shadowDeclValueSyntax? (commandStx : Syntax) : Option Syntax :=
@@ -1425,7 +1384,7 @@ private def renderShadowCodeBlock (entry : ShadowEntry) (snippet : String) : Arr
     ""
   ]
 
-private def appendShadowEntryBlock (_env : Environment) (lines : Array String) (level : Nat) (entry : ShadowEntry)
+private def appendShadowEntryBlock (lines : Array String) (level : Nat) (entry : ShadowEntry)
     (repoUrl? : Option String := none) : IO (Array String) := do
   let snippet := (← readSourceSnippet entry.source).trimAsciiEnd.toString
   let sourceLink := match sourceUrlOf repoUrl? (some entry.source) with
@@ -1448,7 +1407,10 @@ private def appendShadowEntryBlock (_env : Environment) (lines : Array String) (
       ]
       ++ renderShadowCodeBlock entry snippet
 
-private def buildShadowGraphData (entries : Array ShadowEntry) : GraphData := Id.run do
+private def moduleSlug (rootPrefix : Name) (moduleName : Name) : String :=
+  slugify (moduleName.toString.dropPrefix s!"{rootPrefix}.").toString
+
+private def buildShadowGraphData (rootPrefix : Name) (entries : Array ShadowEntry) : GraphData := Id.run do
   let entryNames : Std.HashSet Name := entries.foldl (fun s e => s.insert e.name) {}
   let nodes := entries.map fun entry => {
     id := entry.name.toString
@@ -1458,8 +1420,7 @@ private def buildShadowGraphData (entries : Array ShadowEntry) : GraphData := Id
     groupKey := entry.moduleName.toString
     moduleName := entry.moduleName.toString
     -- Link to the split module page. The module slug matches what split_pages.py generates.
-    href := let modSlug := slugify (entry.moduleName.toString.dropPrefix "BridgelandStability.").toString
-            s!"{modSlug}/"
+    href := s!"{moduleSlug rootPrefix entry.moduleName}/"
   }
   let mut edges : Array GraphEdge := #[]
   for entry in entries do
@@ -1468,7 +1429,7 @@ private def buildShadowGraphData (entries : Array ShadowEntry) : GraphData := Id
         edges := edges.push { source := entry.name.toString, target := dep.toString }
   return { nodes, edges }
 
-private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInfo)
+private def renderComparatorManual (_env : Environment) (tfbInfo : TrustedBaseInfo)
     (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none) : IO String := do
   let some comparator := tfbInfo.comparator?
     | return String.intercalate "\n" [
@@ -1498,7 +1459,6 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   let mut moduleCounts : Std.HashMap Name Nat := {}
   for entry in tfbOnlyEntries do
     moduleCounts := moduleCounts.insert entry.moduleName ((moduleCounts.getD entry.moduleName 0) + 1)
-  let moduleList := moduleCounts.toArray.qsort (fun a b => a.1.lt b.1)
   let mut lines : Array String := #[
     "import VersoManual",
     s!"import {comparator.solutionModule}",
@@ -1535,9 +1495,9 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   -- Solution theorem (## stays on overview page)
   if !solutionEntries.isEmpty then
     for entry in solutionEntries do
-      lines ← appendShadowEntryBlock env lines 2 entry repoUrl?
+      lines ← appendShadowEntryBlock lines 2 entry repoUrl?
   -- Dependency graph (## stays on overview page)
-  let graphData := buildShadowGraphData entries
+  let graphData := buildShadowGraphData rootPrefix entries
   let graphJson := Json.compress (ToJson.toJson graphData)
   lines := lines.push "## Dependency graph"
   lines := lines.push ""
@@ -1567,13 +1527,13 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     let kinds := modEntries.map (·.kind.label) |>.toList.eraseDups
     let kindSummary := String.intercalate ", " kinds
     -- Plain text heading (no backticks) so TOC font matches Overview
-    let shortName := (modName.toString.dropPrefix "BridgelandStability.").toString
+    let shortName := (modName.toString.dropPrefix s!"{rootPrefix}.").toString
     lines := lines.push s!"# {shortName}"
     lines := lines.push ""
     lines := lines.push s!"Module `{modName}` — *{modEntries.size}* declarations ({kindSummary})"
     lines := lines.push ""
     for entry in modEntries do
-      lines ← appendShadowEntryBlock env lines 2 entry repoUrl?
+      lines ← appendShadowEntryBlock lines 2 entry repoUrl?
   pure <| String.intercalate "\n" lines.toList
 
 private def renderComparatorManualMain : String :=
@@ -1983,94 +1943,17 @@ private def updateShadowDependencies (shadowDir : System.FilePath) : IO Unit := 
   else
     runShadowCommand shadowDir "lake" #["update"]
 
-private def splitPagesScript : String := "
-import sys, os, re
-from pathlib import Path
-
-def slugify(s):
-    return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')
-
-def split_html(html_dir):
-    html_path = Path(html_dir) / 'index.html'
-    html = html_path.read_text()
-    head_match = re.search(r'(<head[\\s\\S]*?</head>)', html)
-    if not head_match: return
-    head = head_match.group(1)
-    # Find top-level sections: <section> containing <h1>
-    # These are the # headings in the Verso manual
-    pattern = re.compile(r'(<section[^>]*>\\s*<h[12][^>]*>)')
-    matches = list(pattern.finditer(html))
-    if len(matches) < 2: return  # need at least overview + 1 module
-    sections = []
-    for i, m in enumerate(matches):
-        # Find section start (backtrack to <section)
-        sect_tag_start = html.rfind('<section', max(0, m.start() - 200), m.start() + 1)
-        if sect_tag_start < 0: continue
-        # Extract title
-        h_end = html.find('</h', m.end())
-        title_html = html[m.end():h_end] if h_end > 0 else ''
-        title = re.sub(r'<[^>]+>', '', title_html).strip()
-        # Find section end by counting nesting
-        depth = 1
-        pos = m.end()
-        sect_end = len(html)
-        while depth > 0 and pos < len(html):
-            next_open = html.find('<section', pos)
-            next_close = html.find('</section>', pos)
-            if next_close < 0: break
-            if next_open >= 0 and next_open < next_close:
-                depth += 1
-                pos = next_open + 8
-            else:
-                depth -= 1
-                if depth == 0:
-                    sect_end = next_close + len('</section>')
-                pos = next_close + 10
-        sections.append({'title': title, 'start': sect_tag_start, 'end': sect_end,
-                         'slug': slugify(title) if title else f'section-{i}'})
-    if not sections: return
-    print(f'Found {len(sections)} sections to split')
-    # Save original
-    (Path(html_dir) / 'index-full.html').write_text(html)
-    # Fix asset paths for sub-pages (add ../ prefix)
-    def fix_paths(h):
-        h = re.sub(r'href=\"([^\":/][^\"]*\\.css)\"', r'href=\"../\\1\"', h)
-        h = re.sub(r'href=\"(-verso[^\"]*)\"', r'href=\"../\\1\"', h)
-        h = re.sub(r'src=\"(-verso[^\"]*)\"', r'src=\"../\\1\"', h)
-        h = re.sub(r'<base href=\"[^\"]*\">', '<base href=\"../\">', h)
-        return h
-    # Create sub-pages
-    for sect in sections:
-        page_dir = Path(html_dir) / sect['slug']
-        page_dir.mkdir(exist_ok=True)
-        content = html[sect['start']:sect['end']]
-        sub_head = fix_paths(head)
-        page = f'<!DOCTYPE html>\\n<html>\\n{sub_head}\\n<body>\\n{content}\\n</body>\\n</html>'
-        (page_dir / 'index.html').write_text(page)
-        print(f'  {sect[\"slug\"]}/index.html')
-    # Rewrite landing as redirect to overview
-    overview_slug = sections[0]['slug']
-    toc = ''.join(f'<li><a href=\"{s[\"slug\"]}/\">{s[\"title\"]}</a></li>' for s in sections)
-    landing = f'<!DOCTYPE html>\\n<html>\\n{head}\\n<body>\\n<main><div class=\"content-wrapper\"><ul>{toc}</ul></div></main>\\n</body>\\n</html>'
-    html_path.write_text(landing)
-    print(f'  index.html (landing)')
-
-if __name__ == '__main__':
-    split_html(sys.argv[1])
-"
-
 private def splitShadowPages (shadowDir : System.FilePath) : IO Unit := do
   let htmlDir := shadowSiteDir shadowDir
-  -- Copy the splitter script to the shadow dir
   let scriptPath := shadowDir / "_split_pages.py"
-  -- Find the script from the exposition project root
+  -- Find the split script from the exposition project root
   let exePath ← IO.appPath
   let projectRoot := exePath.parent.getD "." |>.parent.getD "." |>.parent.getD "." |>.parent.getD "."
   let srcScript := projectRoot / "scripts" / "split_pages.py"
   if ← srcScript.pathExists then
     IO.FS.writeBinFile scriptPath (← IO.FS.readBinFile srcScript)
   else
-    IO.FS.writeFile scriptPath splitPagesScript
+    throw <| IO.userError s!"split_pages.py not found at {srcScript}; cannot split pages"
   IO.println s!"[shadow] splitting pages: {htmlDir}"
   let out ← IO.Process.output {
     cmd := "python3"

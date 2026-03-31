@@ -82,57 +82,11 @@ def split_html(html_dir):
     # Save original
     (Path(html_dir) / 'index-full.html').write_text(html)
 
-    # Rewrite TOC links to point to split pages instead of fragments
-    def rewrite_toc(chrome, current_slug):
-        """Rewrite TOC links from fragment-only to page-relative URLs."""
-        def rewrite_link(m):
-            href = m.group(1)
-            # Find which section this fragment belongs to
-            for sect in sections:
-                if sect['slug'] == current_slug:
-                    # Link to self — keep as fragment
-                    pass
-                # Check if the href fragment matches this section's id
-            # Simple approach: rewrite Overview/#id to overview/ etc.
-            for sect in sections:
-                # Match any href that looks like it should go to a section
-                old_patterns = [
-                    f'#{sect["slug"]}',
-                ]
-                for pat in old_patterns:
-                    if pat in href.lower():
-                        if sect['slug'] == current_slug:
-                            return f'href="#{href.split("#")[-1]}"' if '#' in href else m.group(0)
-                        prefix = '../' if current_slug else ''
-                        return f'href="{prefix}{sect["slug"]}/"'
-            return m.group(0)
-        return re.sub(r'href="([^"]*)"', rewrite_link, chrome)
-
     def fix_paths_for_subpage(h):
         """Set <base href="../"> so all relative paths resolve from root.
         No explicit ../ prefixes needed — base handles it."""
         h = re.sub(r'<base href="[^"]*">', '<base href="../">', h)
         return h
-
-    # Extract the original Verso TOC from the single-page HTML and rewrite
-    # its links to point to the split page slugs
-    toc_match = re.search(r'(<nav id="toc">[\s\S]*?</nav>)', html)
-    original_toc = toc_match.group(1) if toc_match else ''
-
-    # Rewrite TOC links: Verso generates "Overview/#fragment" style links.
-    # Replace them with our slug-based paths.
-    def make_toc(prefix=''):
-        toc = original_toc
-        for sect in sections:
-            # Verso uses the title with dots replaced by ___ as the directory name
-            # Find any href that contains the section's h2 id and rewrite it
-            # Just replace all hrefs that point to Verso-generated directories
-            toc = re.sub(
-                r'href="[^"]*#[^"]*' + re.escape(sect['slug'].replace('-', '[_-]?').replace('.', '[._]?')) + r'[^"]*"',
-                f'href="{prefix}{sect["slug"]}/"',
-                toc
-            )
-        return toc
 
     # Simpler approach: extract original TOC table rows and rebuild with our slugs
     toc_rows = []
