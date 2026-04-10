@@ -1470,7 +1470,7 @@ private def updateShadowDependencies (shadowDir : System.FilePath) : IO Unit := 
 
 private def splitShadowPages (shadowDir : System.FilePath) : IO Unit := do
   let htmlDir := shadowSiteDir shadowDir
-  let scriptPath := shadowDir / "_split_pages.py"
+  let scriptPath := (← IO.currentDir) / shadowDir / "_split_pages.py"
   -- Find the split script from the exposition project root
   let exePath ← IO.appPath
   let projectRoot := exePath.parent.getD "." |>.parent.getD "." |>.parent.getD "." |>.parent.getD "."
@@ -1483,7 +1483,6 @@ private def splitShadowPages (shadowDir : System.FilePath) : IO Unit := do
   let out ← IO.Process.output {
     cmd := "python3"
     args := #[scriptPath.toString, htmlDir.toString]
-    cwd := some shadowDir
   }
   printProcessOutput out
   if out.exitCode != 0 then
