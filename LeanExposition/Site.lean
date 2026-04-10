@@ -954,7 +954,7 @@ private def buildShadowGraphData (rootPrefix : Name) (entries : Array ShadowEntr
         edges := edges.push { source := entry.name.toString, target := dep.toString }
   return { nodes, edges }
 
-private def renderComparatorManual (_env : Environment) (tfbInfo : TrustedBaseInfo)
+private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInfo)
     (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none) : IO String := do
   let some comparator := tfbInfo.comparator?
     | return String.intercalate "\n" [
@@ -1021,6 +1021,49 @@ private def renderComparatorManual (_env : Environment) (tfbInfo : TrustedBaseIn
   if !solutionEntries.isEmpty then
     for entry in solutionEntries do
       lines ← appendShadowEntryBlock lines 2 entry repoUrl?
+
+  -- Declaration census: all deps including aux, with resolution
+  lines := lines.push "## Declaration census"
+  lines := lines.push ""
+  lines := lines.push "Every constant in the transitive closure of the target theorem's type."
+  lines := lines.push "Auxiliary declarations are resolved to their user-facing parent."
+  lines := lines.push ""
+  for target in comparator.theoremNames do
+    if let some ci := env.find? target then
+      let rawDeps := Informal.collectDeps env target ci
+      let sorted := rawDeps.toArray.qsort Name.lt
+      let mut userCount := 0
+      let mut auxCount := 0
+      for dep in sorted do
+        let classification := Informal.classifyNonUser env dep
+        if classification.isNone then userCount := userCount + 1
+        else auxCount := auxCount + 1
+      lines := lines.push s!"*{sorted.size}* raw constants: *{userCount}* user-facing, *{auxCount}* auxiliary."
+      lines := lines.push ""
+      for dep in sorted do
+        let classification := Informal.classifyNonUser env dep
+        let resolved := Informal.resolveToUser env dep
+        let kind := match classification with
+          | none => "user"
+          | some (.isProjection _) => "projection"
+          | some (.isCtor _) => "constructor"
+          | some (.isRec _) => "recursor"
+          | some (.isAuxRec) => "aux recursor"
+          | some (.isNoConf) => "noConfusion"
+          | some (.isMatcher) => "matcher"
+          | some (.isCtorIdx _) => "ctorIdx"
+          | some (.isEqnLemma _) => "eqn lemma"
+          | some (.isReserved) => "reserved"
+          | some (.isCtorDeriv _) => "ctor derivative"
+          | some (.isNoConfTy) => "noConfusionType"
+          | some (.isInternal) => "internal"
+          | some (.isImplDetail) => "impl detail"
+          | some (.isQuot) => "quotient"
+        if classification.isNone then
+          lines := lines.push s!" * `{dep}` — user"
+        else
+          lines := lines.push s!" * `{dep}` — {kind} → `{resolved}`"
+  lines := lines.push ""
   -- Dependency graph (## stays on overview page)
   let graphData := buildShadowGraphData rootPrefix entries
   let graphJson := Json.compress (ToJson.toJson graphData)
