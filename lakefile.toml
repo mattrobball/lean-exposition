@@ -10,6 +10,11 @@ name = "verso"
 git = "https://github.com/leanprover/verso"
 rev = "v4.29.0-rc8"
 
+[[require]]
+name = "informal"
+git = "https://github.com/mattrobball/lean-informal"
+rev = "main"
+
 [[lean_lib]]
 name = "LeanExposition"
 

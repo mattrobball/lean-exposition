@@ -6,6 +6,7 @@ import Lean.Util.Sorry
 import Lake.CLI.Main
 import Lake.Load.Workspace
 import MD4Lean
+import Informal
 import LeanExposition.TrustedBase
 import SubVerso.Compat
 import VersoManual
@@ -721,21 +722,12 @@ private def declKindOf (env : Environment) (info : ConstantInfo) (name : Name) :
     | .defnInfo _ => .definition
     | _ => .definition
 
-private def shouldExpose (env : Environment) (rootPrefix : Name) (name : Name) (info : ConstantInfo) : Bool :=
+private def shouldExpose (env : Environment) (rootPrefix : Name) (name : Name) (_info : ConstantInfo) : Bool :=
   if let some moduleName := moduleNameOf env name then
     if !hasPrefixName moduleName rootPrefix then
       false
-    else if env.isProjectionFn name then
-      false
-    else if isInternalName name || name.isInternal || name.isImplementationDetail then
-      false
-    else if isAuxRecursor env name || isNoConfusion env name then
-      false
-    else match info with
-      | .ctorInfo _ | .recInfo _ | .quotInfo _ => false
-      | _ => true
-  else if env.isProjectionFn name then
-    false
+    else
+      (Informal.classifyNonUser env name).isNone
   else
     false
 
@@ -2010,8 +2002,10 @@ private def collectDecls (projectDir : System.FilePath) (rootPrefix : Name)
       match doc? with
       | some doc => markdownToBlocks doc
       | none => #[]
-    let deps :=
-      info.type.getUsedConstants.foldl (fun acc dep => if dep != name then acc.push dep else acc) #[]
+    let rawDeps := Informal.collectDeps env name info
+    let deps := rawDeps.toArray.filterMap fun dep =>
+      let r := Informal.resolveToUser env dep
+      if r != name && (Informal.classifyNonUser env r).isNone then some r else none
     let decl : DeclInfo := {
       name := name
       moduleName := moduleName
