@@ -1032,12 +1032,15 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
     if let some ci := env.find? target then
       let rawDeps := Informal.collectDeps env target ci
       let sorted := rawDeps.toArray.qsort Name.lt
-      let mut userCount := 0
+      let mut resolvedUserSet : Std.HashSet Name := {}
       let mut auxCount := 0
       for dep in sorted do
-        let classification := Informal.classifyNonUser env dep
-        if classification.isNone then userCount := userCount + 1
-        else auxCount := auxCount + 1
+        let resolved := Informal.resolveToUser env dep
+        if (Informal.classifyNonUser env resolved).isNone then
+          resolvedUserSet := resolvedUserSet.insert resolved
+        else
+          auxCount := auxCount + 1
+      let userCount := resolvedUserSet.size
       lines := lines.push s!"*{sorted.size}* raw constants: *{userCount}* user-facing, *{auxCount}* auxiliary."
       lines := lines.push ""
       for dep in sorted do
