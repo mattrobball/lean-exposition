@@ -17,6 +17,7 @@ structure Cli where
   projectDir : System.FilePath := "."
   rootPrefix : Option Name := none
   repoUrl : Option String := none
+  trustedBaseRawUrl : Option String := none
   siteTitle : Option String := none
   outputDir : Option String := none
   comparatorConfig : Option System.FilePath := none
@@ -112,6 +113,10 @@ private def usage : String :=
     "  --project DIR        Path to the target Lean project (default: current directory)",
     "  --root PREFIX        Root module prefix to expose (default: first root library)",
     "  --repo-url URL       GitHub repo URL used for issue/source links",
+    "  --trusted-base-raw-url URL",
+    "                       Raw URL of the project's trusted_base.lean; when set,",
+    "                       the comparator overview shows an 'open in Lean 4 Web",
+    "                       Editor' link that loads it into live.lean-lang.org",
     "  --title TITLE        Site title override",
     "  --output DIR         Output directory passed to Verso",
     "  --comparator-config  Comparator config file relative to the target project",
@@ -132,6 +137,9 @@ private def parseArgs : List String → Except String Cli
   | "--repo-url" :: url :: rest => do
       let cfg ← parseArgs rest
       pure { cfg with repoUrl := some url }
+  | "--trusted-base-raw-url" :: url :: rest => do
+      let cfg ← parseArgs rest
+      pure { cfg with trustedBaseRawUrl := some url }
   | "--title" :: title :: rest => do
       let cfg ← parseArgs rest
       pure { cfg with siteTitle := some title }
@@ -955,7 +963,8 @@ private def buildShadowGraphData (rootPrefix : Name) (entries : Array ShadowEntr
   return { nodes, edges }
 
 private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInfo)
-    (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none) : IO String := do
+    (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none)
+    (trustedBaseRawUrl? : Option String := none) : IO String := do
   let some comparator := tfbInfo.comparator?
     | return String.intercalate "\n" [
         "import VersoManual",
@@ -1010,6 +1019,12 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   ]
   if let some url := repoUrl? then
     lines := lines.push s!"Repository: [{url}]({url})"
+    lines := lines.push ""
+  if let some tfbUrl := trustedBaseRawUrl? then
+    -- live.lean-lang.org parses hash-fragment args with decodeURIComponent,
+    -- so the `url=` value must be passed raw (no percent-encoding).
+    let liveUrl := s!"https://live.lean-lang.org/#project=mathlib-stable&url={tfbUrl}"
+    lines := lines.push s!"Trusted base: [open `trusted_base.lean` in the Lean 4 Web Editor]({liveUrl})"
     lines := lines.push ""
   lines := lines ++ #[
     "This manual presents the comparator view of the formalization.",
@@ -1369,9 +1384,11 @@ private def renderComparatorManualSupport : String :=
   ]
 
 private def writeComparatorManualFiles (env : Environment) (shadowDir : System.FilePath) (tfbInfo : TrustedBaseInfo)
-    (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none) : IO Unit := do
+    (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none)
+    (trustedBaseRawUrl? : Option String := none) : IO Unit := do
   IO.FS.writeFile (shadowDir / s!"{comparatorManualSupportModule}.lean") renderComparatorManualSupport
-  IO.FS.writeFile (shadowDir / s!"{comparatorManualModule}.lean") (← renderComparatorManual env tfbInfo entries rootPrefix repoUrl?)
+  IO.FS.writeFile (shadowDir / s!"{comparatorManualModule}.lean")
+    (← renderComparatorManual env tfbInfo entries rootPrefix repoUrl? trustedBaseRawUrl?)
   IO.FS.writeFile (shadowDir / s!"{comparatorManualMainModule}.lean") renderComparatorManualMain
 
 private def insertBeforeMarkerOrAppend (contents marker block : String) : String :=
@@ -1544,7 +1561,8 @@ private def buildShadowSite (shadowDir : System.FilePath) : IO Unit := do
 
 private unsafe def writeComparatorShadow (projectDir shadowDir : System.FilePath)
     (rootPrefix : Name) (env : Environment) (tfbInfo : TrustedBaseInfo)
-    (entries : Array ShadowEntry) (repoUrl? : Option String := none) : IO Unit := do
+    (entries : Array ShadowEntry) (repoUrl? : Option String := none)
+    (trustedBaseRawUrl? : Option String := none) : IO Unit := do
   if ← shadowDir.pathExists then
     clearShadowDirPreservingLake shadowDir
   else
@@ -1557,7 +1575,7 @@ private unsafe def writeComparatorShadow (projectDir shadowDir : System.FilePath
   copyShadowConfigFiles projectDir shadowDir
   ensureVersoInShadowProject shadowDir
   writeShadowManifest shadowDir tfbInfo entries
-  writeComparatorManualFiles env shadowDir tfbInfo entries rootPrefix repoUrl?
+  writeComparatorManualFiles env shadowDir tfbInfo entries rootPrefix repoUrl? trustedBaseRawUrl?
   buildShadowSite shadowDir
 
 private def detectRepoUrl (projectDir : System.FilePath) : IO (Option String) := do
@@ -1645,7 +1663,8 @@ unsafe def mainImpl (args : List String) : IO UInt32 := do
         return 1
     | some _ =>
         let entries ← loadShadowEntries cfg.projectDir rootPrefix ws.root env (selectedShadowTags tfbInfo)
-        writeComparatorShadow cfg.projectDir shadowDir rootPrefix env tfbInfo entries cfg.repoUrl
+        writeComparatorShadow cfg.projectDir shadowDir rootPrefix env tfbInfo entries
+          cfg.repoUrl cfg.trustedBaseRawUrl
         IO.println s!"Wrote {entries.size} anchored declarations to {shadowDir}"
         IO.println s!"Manifest: {shadowManifestPath shadowDir}"
         IO.println s!"Shadow site: {shadowSiteIndexPath shadowDir}"
