@@ -1,32 +1,29 @@
 import Lean
 import Lean.DeclarationRange
+import Lean.Elab.Import
 import Lean.Meta.Instances
-import Lean.Util.Sorry
 import Lake.CLI.Main
 import Lake.Load.Workspace
-import MD4Lean
-import VersoManual
-import VersoManual.Markdown
+import Informal
+import LeanExposition.TrustedBase
 
 open Lake
 open Lean
 open Lean.Meta
-open Verso.Doc
-open Verso.Genre
-open Manual
 
 namespace LeanExposition
-
-open Verso.Output Html
 
 structure Cli where
   projectDir : System.FilePath := "."
   rootPrefix : Option Name := none
   repoUrl : Option String := none
+  trustedBaseRawUrl : Option String := none
   siteTitle : Option String := none
   outputDir : Option String := none
   comparatorConfig : Option System.FilePath := none
   tfbExe : String := "extractDeps"
+  shadowOutputDir : Option System.FilePath := none
+  shadowOnly : Bool := false
   excludeLibs : Array Name := #[]
 deriving Repr
 
@@ -58,22 +55,14 @@ structure SourceInfo where
   endLine : Nat
 deriving Repr, ToJson, FromJson
 
-structure LinkInfo where
-  label : String
-  href? : Option String := none
+
+structure ComparatorConfigInfo where
+  challengeModule : String
+  solutionModule : String
+  theoremNames : Array Name
+  permittedAxioms : Array String
+  enableNanoda : Bool
 deriving Repr, ToJson, FromJson
-
-structure DeclCardData where
-  anchorId : String
-  shortName : String
-  kindLabel : String
-  fullName : String
-  tags : Array String := #[]
-deriving Repr, ToJson, FromJson, Inhabited
-
-structure DetailsData where
-  summary : String
-deriving Repr, ToJson, FromJson, Inhabited
 
 structure GraphNode where
   id : String
@@ -95,60 +84,25 @@ structure GraphData where
   edges : Array GraphEdge
 deriving Repr, ToJson, FromJson
 
-structure DeclInfo where
+structure ShadowEntry where
   name : Name
   moduleName : Name
-  modulePath : String
-  groupKey : String
+  anchor : String
   kind : DeclKind
+  source : SourceInfo
   displaySignature : String
-  expandedSignature : String
-  docBlocks : Array (Block Manual)
-  proofText? : Option String
-  source? : Option SourceInfo
-  hasSorry : Bool
-  dependsOnSorry : Bool := false
-  inTfb : Bool := false
-  deps : Array Name
-  usedBy : Array Name := #[]
-deriving Repr
+  deps : Array Name := #[]
+  tags : Array String := #[]
+deriving Repr, ToJson, FromJson
 
-structure ModuleInfo where
-  name : Name
-  path : String
-  groupKey : String
-  decls : Array DeclInfo
-deriving Repr
-
-structure GroupInfo where
-  key : String
-  modules : Array ModuleInfo
-deriving Repr
-
-structure MarkdownSection where
-  title : String
-  body : String
-deriving Repr
-
-structure ComparatorConfigInfo where
-  challengeModule : String
-  solutionModule : String
-  theoremNames : Array Name
-  permittedAxioms : Array String
-  enableNanoda : Bool
-deriving Repr
+structure ShadowManifest where
+  comparator? : Option ComparatorConfigInfo := none
+  entries : Array ShadowEntry := #[]
+deriving Repr, ToJson, FromJson
 
 structure TrustedBaseInfo where
   names : Std.HashSet Name := {}
   comparator? : Option ComparatorConfigInfo := none
-  comparatorInstalled : Bool := false
-deriving Repr
-
-structure TargetStatementInfo where
-  theoremName : Name
-  relPath : String
-  line? : Option Nat := none
-  statement? : Option String := none
 deriving Repr
 
 private def usage : String :=
@@ -159,10 +113,16 @@ private def usage : String :=
     "  --project DIR        Path to the target Lean project (default: current directory)",
     "  --root PREFIX        Root module prefix to expose (default: first root library)",
     "  --repo-url URL       GitHub repo URL used for issue/source links",
+    "  --trusted-base-raw-url URL",
+    "                       Raw URL of the project's trusted_base.lean; when set,",
+    "                       the comparator overview shows an 'open in Lean 4 Web",
+    "                       Editor' link that loads it into live.lean-lang.org",
     "  --title TITLE        Site title override",
     "  --output DIR         Output directory passed to Verso",
     "  --comparator-config  Comparator config file relative to the target project",
-    "  --tfb-exe NAME       Lake executable used to compute the trusted-base closure",
+    "  --tfb-exe NAME       Deprecated; trusted-base extraction is built in",
+    "  --write-shadow DIR   Write and build a Verso-ready shadow project",
+    "  --shadow-only        Exit after the shadow project is built",
     "  --exclude-lib NAME   Exclude a root library when importing the target project",
   ]
 
@@ -177,6 +137,9 @@ private def parseArgs : List String → Except String Cli
   | "--repo-url" :: url :: rest => do
       let cfg ← parseArgs rest
       pure { cfg with repoUrl := some url }
+  | "--trusted-base-raw-url" :: url :: rest => do
+      let cfg ← parseArgs rest
+      pure { cfg with trustedBaseRawUrl := some url }
   | "--title" :: title :: rest => do
       let cfg ← parseArgs rest
       pure { cfg with siteTitle := some title }
@@ -189,24 +152,17 @@ private def parseArgs : List String → Except String Cli
   | "--tfb-exe" :: exe :: rest => do
       let cfg ← parseArgs rest
       pure { cfg with tfbExe := exe }
+  | "--write-shadow" :: dir :: rest => do
+      let cfg ← parseArgs rest
+      pure { cfg with shadowOutputDir := some dir }
+  | "--shadow-only" :: rest => do
+      let cfg ← parseArgs rest
+      pure { cfg with shadowOnly := true }
   | "--exclude-lib" :: lib :: rest => do
       let cfg ← parseArgs rest
       pure { cfg with excludeLibs := cfg.excludeLibs.push lib.toName }
   | flag :: _ =>
       .error s!"Unknown or incomplete option: {flag}\n\n{usage}"
-
-private def isAuxComponent (s : String) : Bool :=
-  s.startsWith "_" || s.startsWith "match_" || s.startsWith "proof_" || s.startsWith "eq_"
-
-private partial def isInternalName : Name → Bool
-  | .anonymous => false
-  | .num p _ => isInternalName p
-  | .str p s =>
-      isAuxComponent s
-      || s ∈ ["brecOn", "below", "casesOn", "noConfusion", "noConfusionType",
-              "recOn", "rec", "ind", "mk", "sizeOf_spec", "inject", "injEq",
-              "ctorIdx", "ext_iff"]
-      || isInternalName p
 
 private def hasPrefixName (n prefixName : Name) : Bool :=
   n == prefixName || match n with
@@ -225,18 +181,6 @@ private def slugify (s : String) : String :=
   let slug := s.foldl pushChar ""
   if slug.isEmpty then "item" else slug
 
-private def humanizeWord (s : String) : String :=
-  if s.isEmpty then
-    s
-  else
-    let rec go (chars : List Char) (prevLower : Bool) (acc : String) :=
-      match chars with
-      | [] => acc
-      | ch :: rest =>
-          let insertSpace := prevLower && ch.isUpper
-          let acc := if insertSpace then acc.push ' ' else acc
-          go rest ch.isLower (acc.push ch)
-    go s.toList false ""
 
 private def nameComponents : Name → List String
   | .anonymous => []
@@ -259,123 +203,10 @@ private def modulePathOf (rootPrefix moduleName : Name) : String :=
   | [] => moduleName.toString
   | _ => String.intercalate "." tail
 
-private def anchorIdOf (name : Name) : String :=
-  String.intercalate "___" (name.toString.splitOn ".")
-
-private def mkInlineText (s : String) : Inline Manual :=
-  .text s
-
-private def mkCodeLink (link : LinkInfo) : Inline Manual :=
-  match link.href? with
-  | some href => .link #[.code link.label] href
-  | none => .code link.label
-
-private def joinInlines (xs : List (Array (Inline Manual))) (sep : Array (Inline Manual)) : Array (Inline Manual) :=
-  match xs with
-  | [] => #[]
-  | x :: rest => rest.foldl (fun acc item => acc ++ sep ++ item) x
-
-private def depParagraph (label : String) (links : Array LinkInfo) : Option (Block Manual) :=
-  if links.isEmpty then
-    none
-  else
-    let entries := links.toList.map fun link => #[mkCodeLink link]
-    some <| .para <|
-      #[.bold #[.text s!"{label}: "]] ++
-      joinInlines entries #[.text " · "]
-
-private def depListBlock (links : Array LinkInfo) : Option (Block Manual) :=
-  if links.isEmpty then
-    none
-  else
-    let items := links.map fun link => Verso.Doc.ListItem.mk #[.para #[mkCodeLink link]]
-    some <| .ul items
-
-private def codeListParagraph (label : String) (items : Array String) : Option (Block Manual) :=
-  if items.isEmpty then
-    none
-  else
-    let entries := items.toList.map fun item => #[.code item]
-    some <| .para <|
-      #[.bold #[.text s!"{label}: "]] ++
-      joinInlines entries #[.text " · "]
-
-private def mkLinkParagraph (sourceUrl? issueUrl? : Option String) : Option (Block Manual) :=
-  let items :=
-    ([sourceUrl?.map fun url => .link #[.text "Source"] url,
-      issueUrl?.map fun url => .link #[.text "Open Issue"] url].filterMap id)
-  if items.isEmpty then
-    none
-  else
-    let entries := items.map fun item => #[item]
-    some <| .para <|
-      #[.bold #[.text "Actions: "]] ++ joinInlines entries #[.text " · "]
-
-private def markdownToBlocks (doc : String) : Array (Block Manual) :=
-  match MD4Lean.parse doc (MD4Lean.MD_DIALECT_GITHUB ||| MD4Lean.MD_FLAG_LATEXMATHSPANS ||| MD4Lean.MD_FLAG_NOHTML) with
-  | none => #[.para #[.text doc]]
-  | some parsed =>
-      parsed.blocks.foldl
-        (fun acc block =>
-          match Verso.Genre.Manual.Markdown.blockFromMarkdown' block (handleHeaders := Verso.Genre.Manual.Markdown.strongEmphHeaders') with
-          | .ok out => acc.push out
-          | .error _ => acc.push (.para #[.text doc]))
-        #[]
-
-private def trimBlankLines (lines : List String) : List String :=
-  let dropFront := lines.dropWhile (fun s => s.trimAscii.isEmpty)
-  dropFront.reverse.dropWhile (fun s => s.trimAscii.isEmpty) |>.reverse
-
-private def parseMarkdownSections (text : String) : Array MarkdownSection := Id.run do
-  let lines := text.splitOn "\n"
-  let mut introLines : List String := []
-  let mut currentTitle? : Option String := none
-  let mut currentBody : List String := []
-  let mut sections : Array MarkdownSection := #[]
-  for line in lines do
-    if line.startsWith "## " then
-      match currentTitle? with
-      | some title =>
-          let body := String.intercalate "\n" (trimBlankLines currentBody.reverse)
-          if !body.trimAscii.isEmpty then
-            sections := sections.push { title, body }
-      | none =>
-          let intro := String.intercalate "\n" (trimBlankLines introLines.reverse)
-          if !intro.trimAscii.isEmpty then
-            sections := sections.push { title := "Overview", body := intro }
-      currentTitle? := some (line.drop 3).trimAscii.toString
-      currentBody := []
-    else if line.startsWith "# " then
-      continue
-    else
-      match currentTitle? with
-      | some _ => currentBody := line :: currentBody
-      | none => introLines := line :: introLines
-  match currentTitle? with
-  | some title =>
-      let body := String.intercalate "\n" (trimBlankLines currentBody.reverse)
-      if !body.trimAscii.isEmpty then
-        sections := sections.push { title, body }
-  | none =>
-      let intro := String.intercalate "\n" (trimBlankLines introLines.reverse)
-      if !intro.trimAscii.isEmpty then
-        sections := sections.push { title := "Overview", body := intro }
-  sections
-
 private def readFileIfExists (path : System.FilePath) : IO (Option String) := do
   if ← path.pathExists then
     return some (← IO.FS.readFile path)
   return none
-
-private def extractDepsName? (line : String) : Option Name :=
-  let trimmed := (String.trimAscii line).toString
-  if trimmed.startsWith "- `" then
-    let rest := (trimmed.drop 3).toString
-    match rest.splitOn "`" with
-    | name :: _ => if name.isEmpty then none else some name.toName
-    | [] => none
-  else
-    none
 
 private def loadComparatorConfig? (projectDir : System.FilePath)
     (configPath? : Option System.FilePath := none) : IO (Option ComparatorConfigInfo) := do
@@ -418,107 +249,45 @@ private def loadComparatorConfig? (projectDir : System.FilePath)
               }
           | _, _, _, _, _ => pure none
 
-private def isComparatorInstalled : IO Bool := do
-  let out ← IO.Process.output {
-    cmd := "which"
-    args := #["comparator"]
-  }
-  pure <| out.exitCode == 0
+private def splitTopLevelAssignment? (s : String) : Option (String × String) :=
+  let rec go (chars : List Char) (round curly square angled : Nat) (acc : List Char) : Option (String × String) :=
+    match chars with
+    | [] => none
+    | ':' :: '=' :: rest =>
+        if round == 0 && curly == 0 && square == 0 && angled == 0 then
+          some (
+            (String.trimAscii (String.ofList acc.reverse)).toString,
+            (String.trimAscii (String.ofList rest)).toString
+          )
+        else
+          go rest round curly square angled ('=' :: ':' :: acc)
+    | '(' :: rest => go rest (round + 1) curly square angled ('(' :: acc)
+    | ')' :: rest => go rest (round - 1) curly square angled (')' :: acc)
+    | '{' :: rest => go rest round (curly + 1) square angled ('{' :: acc)
+    | '}' :: rest => go rest round (curly - 1) square angled ('}' :: acc)
+    | '[' :: rest => go rest round curly (square + 1) angled ('[' :: acc)
+    | ']' :: rest => go rest round curly (square - 1) angled (']' :: acc)
+    | '⦃' :: rest => go rest round curly square (angled + 1) ('⦃' :: acc)
+    | '⦄' :: rest => go rest round curly square (angled - 1) ('⦄' :: acc)
+    | ch :: rest => go rest round curly square angled (ch :: acc)
+  go s.toList 0 0 0 0 []
 
-private def moduleRelPathOfString (moduleName : String) : String :=
-  s!"{moduleName.replace "." "/"}.lean"
+private def computeTrustedBaseNames (env : Environment) (rootPrefix : Name)
+    (comparator : ComparatorConfigInfo) : Std.HashSet Name :=
+  extractTrustedBaseNames env {
+    modulePrefix := rootPrefix
+    excludeModulePrefixes := #[comparator.challengeModule.toName]
+  } comparator.theoremNames
 
-private def findDeclarationLine? (lines : Array String) (shortName : String) : Option Nat :=
-  ((List.range lines.size).findSome? fun idx =>
-    let trimmed := (String.trimAscii lines[idx]!).toString
-    if trimmed.startsWith "theorem " && trimmed.contains shortName then
-      some (idx + 1)
-    else
-      none)
-
-private def loadTargetStatementInfo (projectDir : System.FilePath) (challengeModule : String)
-    (theoremName : Name) : IO TargetStatementInfo := do
-  let relPath := moduleRelPathOfString challengeModule
-  let filePath := projectDir / relPath
-  let some contents ← readFileIfExists filePath
-    | pure { theoremName, relPath }
-  let lines := (contents.splitOn "\n").toArray
-  let line? := findDeclarationLine? lines theoremName.getString!
-  let statement? :=
-    line?.bind fun line =>
-      let snippet := String.intercalate "\n" <| (lines.toList.drop (line - 1))
-      let head :=
-        match snippet.splitOn ":=" with
-        | first :: _ => (String.trimAscii first).toString
-        | [] => (String.trimAscii snippet).toString
-      if head.isEmpty then none else some head
-  pure {
-    theoremName
-    relPath
-    line?
-    statement?
-  }
-
-private def targetSourceUrlOf (repoUrl? : Option String) (relPath : String) (line? : Option Nat) : Option String :=
-  match repoUrl? with
-  | none => none
-  | some repoUrl =>
-      some <| match line? with
-        | some line => s!"{repoUrl}/blob/main/{relPath}#L{line}"
-        | none => s!"{repoUrl}/blob/main/{relPath}"
-
-private def loadTrustedBaseTargetBlocks (projectDir : System.FilePath) (repoUrl? : Option String)
-    (tfbInfo : TrustedBaseInfo) : IO (Array (Block Manual)) := do
-  match tfbInfo.comparator? with
-  | none => pure #[]
-  | some comparator =>
-      let mut blocks : Array (Block Manual) := #[]
-      for theoremName in comparator.theoremNames do
-        let info ← loadTargetStatementInfo projectDir comparator.challengeModule theoremName
-        blocks := blocks.push (.para #[.bold #[.text "Checked statement"]])
-        match info.statement? with
-        | some statement => blocks := blocks.push (.code statement)
-        | none => blocks := blocks.push (.para #[.code theoremName.toString])
-        let sourceLabel :=
-          match info.line? with
-          | some line => s!"{info.relPath}:{line}"
-          | none => info.relPath
-        let sourceInline :=
-          match targetSourceUrlOf repoUrl? info.relPath info.line? with
-          | some url => .link #[.text sourceLabel] url
-          | none => .code sourceLabel
-        blocks := blocks.push (.para #[.bold #[.text "Source: "], sourceInline])
-      pure blocks
-
-private def computeTrustedBaseNames (projectDir : System.FilePath) (rootPrefix : Name)
-    (targets : Array Name) (tfbExe : String := "extractDeps") : IO (Std.HashSet Name) := do
-  if targets.isEmpty then
-    return {}
-  let mut names : Std.HashSet Name := {}
-  for target in targets do
-    let out ← IO.Process.output {
-      cmd := "lake"
-      args := #["exe", tfbExe, target.toString, rootPrefix.toString]
-      cwd := some projectDir
-    }
-    if out.exitCode != 0 then
-      return {}
-    for line in out.stdout.splitOn "\n" do
-      if let some dep := extractDepsName? line then
-        names := names.insert dep
-  pure names
-
-private def loadTrustedBaseInfo (cfg : Cli) (rootPrefix : Name) : IO TrustedBaseInfo := do
+private def loadTrustedBaseInfo (cfg : Cli) (rootPrefix : Name) (env : Environment) : IO TrustedBaseInfo := do
   let comparator? ← loadComparatorConfig? cfg.projectDir cfg.comparatorConfig
-  let comparatorInstalled ← isComparatorInstalled
   match comparator? with
-  | none => pure { comparatorInstalled := comparatorInstalled }
+  | none => pure {}
   | some comparator =>
-      let names ← computeTrustedBaseNames cfg.projectDir rootPrefix comparator.theoremNames cfg.tfbExe
+      let names := computeTrustedBaseNames env rootPrefix comparator
       pure {
         names
         comparator? := some comparator
-        comparatorInstalled := comparatorInstalled
       }
 
 private def ppExprString (env : Environment) (e : Expr) : IO String := do
@@ -587,22 +356,43 @@ private def cleanDeclSnippet (snippet : String) : String :=
   (String.trimAscii (String.intercalate "\n" (dropLeadingDecorations (snippet.splitOn "\n")))).toString
 
 private def headBeforeAssignment (snippet : String) : String :=
-  match snippet.splitOn ":=" with
-  | first :: _ => (String.trimAscii first).toString
-  | [] => (String.trimAscii snippet).toString
+  match splitTopLevelAssignment? snippet with
+  | some (first, _) => first
+  | none => (String.trimAscii snippet).toString
 
-private def headBeforeWhere (snippet : String) : String :=
+private def dropSuffixString? (s suffix : String) : Option String :=
+  if s.endsWith suffix then
+    some <| String.ofList ((s.toList.reverse.drop suffix.length).reverse)
+  else
+    none
+
+private def headBeforeWhere? (snippet : String) : Option String :=
   let rec go (remaining : List String) (acc : List String) :=
     match remaining with
-    | [] => String.intercalate "\n" acc.reverse
+    | [] => none
     | line :: rest =>
-        let acc := line :: acc
         let trimmed := (String.trimAscii line).toString
-        if trimmed == "where" || trimmed.endsWith " where" || trimmed.endsWith "where" then
-          String.intercalate "\n" acc.reverse
+        if trimmed == "where" then
+          some <| (String.trimAscii (String.intercalate "\n" acc.reverse)).toString
         else
-          go rest acc
-  (String.trimAscii (go (snippet.splitOn "\n") [])).toString
+          let prefix? := dropSuffixString? trimmed " where"
+          match prefix? with
+          | some pfx =>
+              let acc := if pfx.isEmpty then acc else pfx :: acc
+              some <| (String.trimAscii (String.intercalate "\n" acc.reverse)).toString
+          | none =>
+              go rest (line :: acc)
+  go (snippet.splitOn "\n") []
+
+private def headBeforeProof (snippet : String) : String :=
+  let assignmentHead := headBeforeAssignment snippet
+  match headBeforeWhere? snippet with
+  | some whereHead =>
+      if assignmentHead.contains "where" then
+        whereHead
+      else
+        assignmentHead
+  | none => assignmentHead
 
 private def displaySignatureFromSource (kind : DeclKind) (src? : Option SourceInfo) : IO (Option String) := do
   let some src := src? | return none
@@ -612,46 +402,10 @@ private def displaySignatureFromSource (kind : DeclKind) (src? : Option SourceIn
   let rendered :=
     match kind with
     | .definition | .structure | .typeclass | .inductive => snippet
-    | _ => headBeforeAssignment snippet
+    | _ => headBeforeProof snippet
   if rendered.isEmpty then
     return none
   return some rendered
-
-private def stripDeclPrefix (kind : DeclKind) (shortName : String) (signature : String) : String :=
-  let pfx := s!"{declKeyword kind} {shortName}"
-  match signature.dropPrefix? pfx with
-  | some rest => (String.trimAscii rest.toString).toString
-  | none => signature
-
-private def splitTopLevelColon? (s : String) : Option (String × String) :=
-  let rec go (chars : List Char) (round curly square angled : Nat) (acc : List Char) : Option (String × String) :=
-    match chars with
-    | [] => none
-    | ':' :: rest =>
-        if round == 0 && curly == 0 && square == 0 && angled == 0 then
-          some (
-            (String.trimAscii (String.ofList acc.reverse)).toString,
-            (String.trimAscii (String.ofList rest)).toString
-          )
-        else
-          go rest round curly square angled (':' :: acc)
-    | '(' :: rest => go rest (round + 1) curly square angled ('(' :: acc)
-    | ')' :: rest => go rest (round - 1) curly square angled (')' :: acc)
-    | '{' :: rest => go rest round (curly + 1) square angled ('{' :: acc)
-    | '}' :: rest => go rest round (curly - 1) square angled ('}' :: acc)
-    | '[' :: rest => go rest round curly (square + 1) angled ('[' :: acc)
-    | ']' :: rest => go rest round curly (square - 1) angled (']' :: acc)
-    | '⦃' :: rest => go rest round curly square (angled + 1) ('⦃' :: acc)
-    | '⦄' :: rest => go rest round curly square (angled - 1) ('⦄' :: acc)
-    | ch :: rest => go rest round curly square angled (ch :: acc)
-  go s.toList 0 0 0 0 []
-
-private def signatureSections? (kind : DeclKind) (shortName : String) (signature : String) : Option (String × String) :=
-  match kind with
-  | .theorem | .definition | .opaque | .axiom | .instance =>
-      let remainder := stripDeclPrefix kind shortName signature
-      splitTopLevelColon? remainder
-  | _ => none
 
 private def moduleNameOf (env : Environment) (name : Name) : Option Name := do
   let idx ← env.getModuleIdxFor? name
@@ -674,21 +428,12 @@ private def declKindOf (env : Environment) (info : ConstantInfo) (name : Name) :
     | .defnInfo _ => .definition
     | _ => .definition
 
-private def shouldExpose (env : Environment) (rootPrefix : Name) (name : Name) (info : ConstantInfo) : Bool :=
+private def shouldExpose (env : Environment) (rootPrefix : Name) (name : Name) (_info : ConstantInfo) : Bool :=
   if let some moduleName := moduleNameOf env name then
     if !hasPrefixName moduleName rootPrefix then
       false
-    else if env.isProjectionFn name then
-      false
-    else if isInternalName name || name.isInternal || name.isImplementationDetail then
-      false
-    else if isAuxRecursor env name || isNoConfusion env name then
-      false
-    else match info with
-      | .ctorInfo _ | .recInfo _ | .quotInfo _ => false
-      | _ => true
-  else if env.isProjectionFn name then
-    false
+    else
+      (Stan.classifyNonUser env name).isNone
   else
     false
 
@@ -741,31 +486,113 @@ private def moduleOrderMap (projectDir : System.FilePath) (rootPrefix : Name) : 
   let (_, order, _) ← visitModuleImports projectDir rootPrefix rootPrefix {} (initial.insert rootPrefix 0) 1
   return order
 
-private def proofTextFromSource (kind : DeclKind) (src? : Option SourceInfo) : IO (Option String) := do
-  match kind, src? with
-  | .theorem, some src
-  | .opaque, some src
-  | .instance, some src =>
-      let snippet := (String.trimAscii (← readSourceSnippet src)).toString
-      match snippet.splitOn ":=" with
-      | _prefix :: rest@(_ :: _) =>
-          pure <| some <| (String.trimAscii (String.intercalate ":=" rest)).toString
-      | _ =>
-          pure <| some snippet
-  | _, _ => pure none
+private def insertExprDeps (self : Name) (acc : Std.HashSet Name) (e : Expr) : Std.HashSet Name :=
+  e.getUsedConstants.foldl
+    (fun acc dep => if dep != self then acc.insert dep else acc)
+    acc
 
-private def hasSorryIn (info : ConstantInfo) : Bool :=
-  info.type.hasSorry || info.value?.any Expr.hasSorry
+private def directShadowDeps (env : Environment) (name : Name) (info : ConstantInfo) : Array Name := Id.run do
+  let mut deps : Std.HashSet Name := {}
+  match info with
+  | .defnInfo v =>
+      deps := insertExprDeps name deps v.type
+      deps := insertExprDeps name deps v.value
+  | .thmInfo v =>
+      deps := insertExprDeps name deps v.type
+  | .opaqueInfo v =>
+      deps := insertExprDeps name deps v.type
+      deps := insertExprDeps name deps v.value
+  | .inductInfo v =>
+      deps := insertExprDeps name deps v.type
+      for ctor in v.ctors do
+        if ctor != name then
+          deps := deps.insert ctor
+        if let some ctorInfo := env.find? ctor then
+          deps := insertExprDeps name deps ctorInfo.type
+  | .ctorInfo v =>
+      deps := insertExprDeps name deps v.type
+  | .recInfo v =>
+      deps := insertExprDeps name deps v.type
+  | .axiomInfo v =>
+      deps := insertExprDeps name deps v.type
+  | .quotInfo _ => ()
+  deps.toArray.qsort Name.lt
 
-private def moduleIndexMap (decls : Array DeclInfo) : Std.HashMap Name (Array DeclInfo) :=
-  decls.foldl
-    (fun acc decl => acc.insert decl.moduleName ((acc.getD decl.moduleName #[]).push decl))
+private def relevantShadowDepMap (entries : Array ShadowEntry) : Std.HashMap Name (Array Name) :=
+  let relevant : Std.HashSet Name :=
+    entries.foldl (fun acc entry => acc.insert entry.name) {}
+  entries.foldl
+    (fun acc entry =>
+      acc.insert entry.name (entry.deps.filter fun dep => dep != entry.name && relevant.contains dep))
     {}
 
-private def groupIndexMap (mods : Array ModuleInfo) : Std.HashMap String (Array ModuleInfo) :=
-  mods.foldl
-    (fun acc modInfo => acc.insert modInfo.groupKey ((acc.getD modInfo.groupKey #[]).push modInfo))
-    {}
+private def shadowEntryLt (moduleOrder : Std.HashMap Name Nat) (a b : ShadowEntry) : Bool :=
+  let ra := moduleOrder.getD a.moduleName 1000000000
+  let rb := moduleOrder.getD b.moduleName 1000000000
+  if ra == rb then
+    if a.moduleName == b.moduleName then
+      if a.source.line == b.source.line then
+        a.name.lt b.name
+      else
+        a.source.line < b.source.line
+    else
+      a.moduleName.lt b.moduleName
+  else
+    ra < rb
+
+private def shadowTopologicalLayers (moduleOrder : Std.HashMap Name Nat)
+    (entries : Array ShadowEntry) : Array (Array ShadowEntry) := Id.run do
+  let depMap := relevantShadowDepMap entries
+  let dependentMap : Std.HashMap Name (Array Name) :=
+    depMap.toArray.foldl
+      (fun acc pair =>
+        let name := pair.1
+        let deps := pair.2
+        deps.foldl
+          (fun acc dep => acc.insert dep ((acc.getD dep #[]).push name))
+          acc)
+      {}
+  let entryMap : Std.HashMap Name ShadowEntry :=
+    entries.foldl (fun acc entry => acc.insert entry.name entry) {}
+  let mut indegree : Std.HashMap Name Nat := {}
+  for entry in entries do
+    indegree := indegree.insert entry.name (depMap.getD entry.name #[]).size
+  let mut frontier :=
+    (entries.filter fun entry => indegree.getD entry.name 0 == 0).qsort (shadowEntryLt moduleOrder)
+  let mut emitted : Std.HashSet Name := {}
+  let mut layers : Array (Array ShadowEntry) := #[]
+  while !frontier.isEmpty do
+    layers := layers.push frontier
+    let mut next : Array ShadowEntry := #[]
+    for entry in frontier do
+      if !emitted.contains entry.name then
+        emitted := emitted.insert entry.name
+        for dependent in dependentMap.getD entry.name #[] do
+          let newDegree := (indegree.getD dependent 0).pred
+          indegree := indegree.insert dependent newDegree
+          if newDegree == 0 then
+            if let some dependentEntry := entryMap.get? dependent then
+              next := next.push dependentEntry
+    frontier := next.qsort (shadowEntryLt moduleOrder)
+  let leftovers :=
+    (entries.filter fun entry => !emitted.contains entry.name).qsort (shadowEntryLt moduleOrder)
+  if !leftovers.isEmpty then
+    layers := layers.push leftovers
+  layers
+
+private def flattenShadowLayers (layers : Array (Array ShadowEntry)) : Array ShadowEntry :=
+  layers.foldl (fun acc layer => acc ++ layer) #[]
+
+private def shadowLayerMapFromOrderedEntries (entries : Array ShadowEntry) : Std.HashMap Name Nat := Id.run do
+  let depMap := relevantShadowDepMap entries
+  let mut layers : Std.HashMap Name Nat := {}
+  for entry in entries do
+    let entryLayer :=
+      (depMap.getD entry.name #[]).foldl
+        (fun acc dep => max acc (layers.getD dep 1 + 1))
+        1
+    layers := layers.insert entry.name entryLayer
+  layers
 
 private def issueUrlOf (repoUrl? : Option String) (decl : Name) (moduleName : Name) (source? : Option SourceInfo) (hasSorry : Bool) : Option String :=
   repoUrl?.map fun repoUrl =>
@@ -791,32 +618,6 @@ private def sourceUrlOf (repoUrl? : Option String) (source? : Option SourceInfo)
   match repoUrl?, source? with
   | some repoUrl, some src => some s!"{repoUrl}/blob/main/{src.relPath}#L{src.line}"
   | _, _ => none
-
-private def repoFileUrlOf (repoUrl? : Option String) (relPath : String) : Option String :=
-  repoUrl?.map fun repoUrl => s!"{repoUrl}/blob/main/{relPath}"
-
-private def groupHrefOf (groupKey : String) : String :=
-  s!"chapter-{slugify groupKey}/"
-
-private def moduleHrefOf (modulePath : String) : String :=
-  s!"module-{slugify modulePath}/"
-
-private def trustedBaseGroupHrefOf (groupKey : String) : String :=
-  s!"tfb-chapter-{slugify groupKey}/"
-
-private def trustedBaseModuleHrefOf (modulePath : String) : String :=
-  s!"tfb-module-{slugify modulePath}/"
-
-private def pathForPart (groupKey modulePath : String) (declName : Name) : String :=
-  s!"{groupHrefOf groupKey}{moduleHrefOf modulePath}#{anchorIdOf declName}"
-
-private def pathForTrustedBasePart (groupKey modulePath : String) (declName : Name) : String :=
-  s!"{trustedBaseGroupHrefOf groupKey}{trustedBaseModuleHrefOf modulePath}#{anchorIdOf declName}"
-
-private def declHrefMap (decls : Array DeclInfo) : Std.HashMap Name String :=
-  decls.foldl
-    (fun acc decl => acc.insert decl.name (pathForPart decl.groupKey decl.modulePath decl.name))
-    {}
 
 private def runCoreIO {α : Type} (env : Environment) (x : CoreM α) : IO α := do
   x.toIO'
@@ -853,1324 +654,948 @@ private def toSourceInfo? (projectDir : System.FilePath) (pkg : Lake.Package) (m
     endLine := ranges.range.endPos.line
   }
 
-private def collectDecls (projectDir : System.FilePath) (rootPrefix : Name)
-    (pkg : Lake.Package) (env : Environment) : IO (Array DeclInfo) := do
-  let mut decls := #[]
-  for (name, info) in env.constants.toList do
+private def shadowManifestPath (shadowDir : System.FilePath) : System.FilePath :=
+  shadowDir / "exposition-shadow.json"
+
+private def comparatorManualModule : String :=
+  "ComparatorManual"
+
+private def comparatorManualSupportModule : String :=
+  "ComparatorManualSupport"
+
+private def comparatorManualMainModule : String :=
+  "ComparatorManualMain"
+
+private def comparatorManualExe : String :=
+  "comparatorManual"
+
+private def shadowSiteDir (shadowDir : System.FilePath) : System.FilePath :=
+  shadowDir / "_out" / "html-multi"
+
+private def shadowSiteIndexPath (shadowDir : System.FilePath) : System.FilePath :=
+  shadowSiteDir shadowDir / "index.html"
+
+private def versoShadowGit : String :=
+  "https://github.com/leanprover/verso"
+
+private def versoShadowRev : String :=
+  "v4.29.0-rc8"
+
+private def versoRevOfToolchain (toolchain : String) : String :=
+  match toolchain.trimAscii.toString.splitOn ":" with
+  | _ :: version :: _ =>
+      let version := version.trimAscii.toString
+      if version.isEmpty then versoShadowRev else version
+  | _ => versoShadowRev
+
+private def insertShadowTag (acc : Std.HashMap Name (Array String)) (name : Name) (tag : String)
+    : Std.HashMap Name (Array String) :=
+  let tags := acc.getD name #[]
+  if tags.contains tag then
+    acc
+  else
+    acc.insert name (tags.push tag)
+
+private def selectedShadowTags (tfbInfo : TrustedBaseInfo) : Std.HashMap Name (Array String) :=
+  let acc :=
+    tfbInfo.names.toArray.foldl
+      (fun acc name => insertShadowTag acc name "tfb")
+      {}
+  match tfbInfo.comparator? with
+  | none => acc
+  | some comparator =>
+      comparator.theoremNames.foldl
+        (fun acc name => insertShadowTag acc name "solution")
+        acc
+
+private def loadShadowEntries (projectDir : System.FilePath) (rootPrefix : Name)
+    (pkg : Lake.Package) (env : Environment)
+    (selected : Std.HashMap Name (Array String)) : IO (Array ShadowEntry) := do
+  let order := (← moduleOrderMap projectDir rootPrefix)
+  let mut entries := #[]
+  for (name, tags) in selected.toArray.qsort (fun a b => a.1.lt b.1) do
+    let some info := env.find? name | continue
     let some moduleName := moduleNameOf env name | continue
     if !shouldExpose env rootPrefix name info then
       continue
     let ranges? ← findRanges? env name
     let source? ← toSourceInfo? projectDir pkg moduleName ranges?
+    let some source := source? | continue
     let kind := declKindOf env info name
     let expandedSignature ← ppExprString env info.type
     let displaySignature :=
-      (← displaySignatureFromSource kind source?).getD <|
+      (← displaySignatureFromSource kind (some source)).getD <|
         displaySignatureFallback kind name expandedSignature
-    let proofText? ← proofTextFromSource kind source?
-    let doc? ← findDocString? env name
-    let docBlocks :=
-      match doc? with
-      | some doc => markdownToBlocks doc
-      | none => #[]
-    let deps :=
-      info.type.getUsedConstants.foldl (fun acc dep => if dep != name then acc.push dep else acc) #[]
-    let decl : DeclInfo := {
-      name := name
-      moduleName := moduleName
-      modulePath := modulePathOf rootPrefix moduleName
-      groupKey := groupKeyOfModule rootPrefix moduleName
-      kind := kind
-      displaySignature := displaySignature
-      expandedSignature := expandedSignature
-      docBlocks := docBlocks
-      proofText? := proofText?
-      source? := source?
-      hasSorry := hasSorryIn info
-      deps := deps
+    let deps := directShadowDeps env name info
+    entries := entries.push {
+      name
+      moduleName
+      anchor := name.toString
+      kind
+      source
+      displaySignature
+      deps
+      tags
     }
-    decls := decls.push decl
-  pure decls
-
-private def attachReverseDeps (decls : Array DeclInfo) : Array DeclInfo :=
-  let exposed : Std.HashSet Name := decls.foldl (fun s decl => s.insert decl.name) {}
-  let rev : Std.HashMap Name (Array Name) := decls.foldl
-    (fun acc decl =>
-      decl.deps.foldl
-        (fun inner dep =>
-          if exposed.contains dep then
-            inner.insert dep ((inner.getD dep #[]).push decl.name)
-          else
-            inner)
-        acc)
-    {}
-  decls.map fun decl => { decl with usedBy := (rev.getD decl.name #[]).qsort Name.lt }
-
-private def attachDependsOnSorry (decls : Array DeclInfo) : Array DeclInfo :=
-  Id.run do
-    let exposed : Std.HashSet Name := decls.foldl (fun s decl => s.insert decl.name) {}
-    let mut marked : Std.HashSet Name :=
-      decls.foldl (fun s decl => if decl.hasSorry then s.insert decl.name else s) {}
-    let mut changed := true
-    while changed do
-      changed := false
-      for decl in decls do
-        if !marked.contains decl.name then
-          let depends := decl.deps.any fun dep => exposed.contains dep && marked.contains dep
-          if depends then
-            marked := marked.insert decl.name
-            changed := true
-    return decls.map fun decl => { decl with dependsOnSorry := marked.contains decl.name }
-
-private def attachTrustedBaseFlags (tfb : Std.HashSet Name) (decls : Array DeclInfo) : Array DeclInfo :=
-  decls.map fun decl => { decl with inTfb := tfb.contains decl.name }
-
-private def moduleRank (order : Std.HashMap Name Nat) (moduleName : Name) : Nat :=
-  order.getD moduleName 1000000000
-
-private def sortModules (order : Std.HashMap Name Nat) (mods : Array ModuleInfo) : Array ModuleInfo :=
-  mods.qsort fun a b =>
-    let ra := moduleRank order a.name
-    let rb := moduleRank order b.name
-    if ra == rb then a.path < b.path else ra < rb
-
-private def sortDeclsInModules (mods : Array ModuleInfo) : Array ModuleInfo :=
-  mods.map fun modInfo =>
-    let decls :=
-      modInfo.decls.qsort fun a b =>
-        match a.source?, b.source? with
-        | some sa, some sb => if sa.line == sb.line then a.name.lt b.name else sa.line < sb.line
-        | some _, none => true
-        | none, some _ => false
-        | none, none => a.name.lt b.name
-    { modInfo with decls := decls }
-
-private def buildModules (rootPrefix : Name) (order : Std.HashMap Name Nat) (decls : Array DeclInfo) : Array ModuleInfo :=
-  let mods := moduleIndexMap decls |>.toArray.map fun (name, ds) => {
-    name := name
-    path := modulePathOf rootPrefix name
-    groupKey := groupKeyOfModule rootPrefix name
-    decls := ds
-  }
-  sortDeclsInModules <| sortModules order mods
-
-private def buildGroups (order : Std.HashMap Name Nat) (mods : Array ModuleInfo) : Array GroupInfo :=
-  let groupRank (group : GroupInfo) : Nat :=
-    group.modules.foldl (fun best modInfo => min best (moduleRank order modInfo.name)) 1000000000
-  groupIndexMap mods |>.toArray
-    |>.map (fun (key, modules) => { key, modules := sortModules order modules })
-    |>.qsort (fun a b =>
-      let ra := groupRank a
-      let rb := groupRank b
-      if ra == rb then a.key < b.key else ra < rb)
-
-private def mkSourceParagraph (label : String) (url? : Option String) : Array (Block Manual) :=
-  match url? with
-  | some url => #[.para #[.bold #[.text "Source: "], .link #[.text label] url]]
-  | none => #[]
-
-private def mkMarkdownPart (title : String) (fileSlug : String) (body : String)
-    (sourceUrl? : Option String := none) (shortTitle? : Option String := none)
-    (sourceLabel? : Option String := none)
-    (subParts : Array (Part Manual) := #[]) : Part Manual :=
-  {
-    title := #[.text title]
-    titleString := title
-    metadata := some {
-      file := some fileSlug
-      shortTitle := shortTitle?
-      tag := some (.provided fileSlug)
-      number := false
-    }
-    content := mkSourceParagraph (sourceLabel?.getD title) sourceUrl? ++ markdownToBlocks body
-    subParts := subParts
-  }
-
-private def loadProjectContextParts (projectDir : System.FilePath) (repoUrl? : Option String)
-    : IO (Array (Block Manual) × Array (Part Manual)) := do
-  let readmePath := projectDir / "README.md"
-  let mut rootBlocks : Array (Block Manual) := #[]
-  let mut parts : Array (Part Manual) := #[]
-
-  if let some readme ← readFileIfExists readmePath then
-    let sections := parseMarkdownSections readme
-    let sections :=
-      sections.takeWhile fun sec => sec.title != "Selected References"
-    if let some overview := sections[0]? then
-      rootBlocks := rootBlocks ++ #[.para #[.text "Project overview."]] ++ markdownToBlocks overview.body
-      let contextSubParts :=
-        sections.toList.drop 1 |>.toArray.map fun sec =>
-          mkMarkdownPart sec.title s!"context-{slugify sec.title}" sec.body
-      let contextPage := {
-        title := #[.text "Overview"]
-        titleString := "Overview"
-        metadata := some {
-          file := some "context"
-          shortTitle := some "Overview"
-          tag := some (.provided "project-context")
-          number := false
-        }
-        content := mkSourceParagraph "README.md" (repoFileUrlOf repoUrl? "README.md") ++ markdownToBlocks overview.body
-        subParts := contextSubParts
-      }
-      parts := parts.push contextPage
-
-  return (rootBlocks, parts)
-
-def customCss : String := "
-:root {
-  --verso-structure-color: #154734;
-  --verso-toc-background-color: #f4efe5;
-  --verso-selected-color: #f0dcc8;
-  --verso-text-font-family: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif;
-  --verso-structure-font-family: 'Avenir Next Condensed', 'Gill Sans', sans-serif;
-  --verso-code-font-family: 'Iosevka Term', 'JetBrains Mono', monospace;
-  --site-ink: #193428;
-  --site-muted: #5a655f;
-  --site-warm: #fbf7ef;
-  --site-card: #fffdf8;
-  --site-accent: #a14d2a;
-  --site-border: #d8cdbd;
-  --site-content-min-width: 52rem;
-  --site-collapsed-sidebar-width: 9rem;
-}
-
-body {
-  background:
-    radial-gradient(circle at top left, rgba(198, 148, 92, 0.12), transparent 28%),
-    linear-gradient(180deg, #fcfaf5 0%, #f5efe6 100%);
-  color: var(--site-ink);
-}
-
-.decl-section {
-  scroll-margin-top: 5rem;
-}
-
-.decl-heading {
-  align-items: center;
-  display: flex;
-  gap: 0.5rem;
-  margin: 1.8rem 0 0.5rem;
-}
-
-.decl-heading code {
-  font-size: 1.05rem;
-}
-
-.decl-permalink {
-  color: var(--site-muted);
-  font-size: 0.95rem;
-  text-decoration: none;
-}
-
-.decl-permalink:hover {
-  color: var(--site-accent);
-}
-
-.decl-card {
-  background: var(--site-card);
-  border: 1px solid var(--site-border);
-  border-left: 6px solid var(--verso-structure-color);
-  border-radius: 14px;
-  margin: 1.2rem 0 1.8rem;
-  padding: 1rem 1.2rem 1.1rem;
-  box-shadow: 0 10px 28px rgba(52, 36, 18, 0.06);
-}
-
-.decl-card-header {
-  align-items: flex-start;
-  display: flex;
-  gap: 0.8rem;
-  justify-content: space-between;
-  margin-bottom: 0.8rem;
-}
-
-.decl-card-title {
-  min-width: 0;
-}
-
-.decl-card-label {
-  color: var(--site-muted);
-  font-family: var(--verso-structure-font-family);
-  font-size: 0.92rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.decl-card-name {
-  display: block;
-  font-family: var(--verso-code-font-family);
-  font-size: 0.95rem;
-  margin-top: 0.1rem;
-}
-
-.decl-card-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-  justify-content: flex-end;
-  margin-top: 0;
-}
-
-.decl-card-tag {
-  border: 1px solid var(--site-border);
-  border-radius: 999px;
-  font-family: var(--verso-structure-font-family);
-  font-size: 0.82rem;
-  padding: 0.2rem 0.55rem;
-}
-
-.decl-card-tag.sorry {
-  background: #fff2ec;
-  border-color: #e8b294;
-  color: #8b3517;
-}
-
-.decl-card-tag.tfb {
-  background: #eef3ff;
-  border-color: #b8c8ef;
-  color: #294b88;
-}
-
-.decl-card-tagbar {
-  align-items: flex-start;
-  display: flex;
-  flex: 0 0 auto;
-}
-
-.decl-card-action {
-  background: var(--site-ink);
-  border-radius: 999px;
-  color: white !important;
-  font-family: var(--verso-structure-font-family);
-  font-size: 0.82rem;
-  padding: 0.35rem 0.75rem;
-  text-decoration: none !important;
-}
-
-.decl-card details {
-  border-top: 1px solid rgba(216, 205, 189, 0.8);
-  margin-top: 0.9rem;
-  padding-top: 0.75rem;
-}
-
-.decl-card summary {
-  color: var(--site-accent);
-  cursor: pointer;
-  font-family: var(--verso-structure-font-family);
-  font-weight: 700;
-}
-
-.decl-card details ul {
-  margin: 0.65rem 0 0;
-  padding-left: 1.25rem;
-}
-
-.decl-card details li + li {
-  margin-top: 0.25rem;
-}
-
-.decl-card pre,
-.decl-card code.hl.lean.block {
-  background: #faf4e8 !important;
-  border: 1px solid #eadfcf;
-  border-radius: 10px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
-}
-
-.decl-card pre {
-  overflow-x: auto;
-  padding: 0.85rem 1rem;
-}
-
-.header-logo-wrapper,
-.with-toc #toc,
-.with-toc > main {
-  transition:
-    flex-basis var(--verso-toc-transition-time) ease,
-    width var(--verso-toc-transition-time) ease,
-    padding-left var(--verso-toc-transition-time) ease,
-    transform var(--verso-toc-transition-time) ease;
-}
-
-.site-toc-toggle {
-  display: none;
-}
-
-.site-utility-nav {
-  align-items: flex-start;
-  border-bottom: 1px solid rgba(216, 205, 189, 0.9);
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin: 0.2rem 0 0.8rem;
-  padding: 0 1rem 0.85rem;
-}
-
-.site-utility-link {
-  color: var(--site-ink);
-  font-family: var(--verso-structure-font-family);
-  font-size: 0.82rem;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  text-decoration: none;
-}
-
-.site-utility-link:hover {
-  color: var(--site-accent);
-}
-
-@media screen and (min-width: 701px) {
-  .site-toc-toggle {
-    background: var(--site-card);
-    border: 1px solid var(--site-border);
-    border-radius: 999px;
-    color: var(--site-ink);
-    cursor: pointer;
-    display: inline-flex;
-    font-family: var(--verso-structure-font-family);
-    font-size: 0.85rem;
-    margin: 0 1rem 0.85rem;
-    padding: 0.45rem 0.8rem;
-    width: fit-content;
-  }
-
-  body.site-toc-collapsed .with-toc #toc {
-    width: var(--site-collapsed-sidebar-width);
-  }
-
-  body.site-toc-collapsed .with-toc > main {
-    padding-left: var(--site-collapsed-sidebar-width);
-  }
-
-  body.site-toc-collapsed .header-logo-wrapper {
-    flex-basis: var(--site-collapsed-sidebar-width);
-    padding-left: 0;
-    width: var(--site-collapsed-sidebar-width);
-  }
-
-  body.site-toc-collapsed #toc .split-tocs,
-  body.site-toc-collapsed #toc .last {
-    display: none;
-  }
-}
-
-@media screen and (min-width: 900px) {
-  .content-wrapper {
-    box-sizing: border-box;
-    margin: 0;
-    max-width: none;
-    width: 100%;
-  }
-
-  .content-wrapper > section,
-  main section {
-    box-sizing: border-box;
-    max-width: none;
-    min-width: min(var(--site-content-min-width), calc(100vw - var(--verso-toc-width) - 4rem));
-    width: 100%;
-  }
-}
-
-#graph-root {
-  background: var(--site-card);
-  border: 1px solid var(--site-border);
-  border-radius: 14px;
-  min-height: 720px;
-  padding: 1rem;
-}
-
-.graph-toolbar {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.8rem;
-  margin-bottom: 0.8rem;
-}
-
-.graph-toolbar input,
-.graph-toolbar select,
-.graph-toolbar button {
-  border: 1px solid var(--site-border);
-  border-radius: 999px;
-  padding: 0.55rem 0.9rem;
-}
-
-.graph-toolbar input,
-.graph-toolbar select {
-  font-family: var(--verso-text-font-family);
-}
-
-.graph-toolbar input {
-  flex: 1 1 20rem;
-}
-
-.graph-toolbar button {
-  background: var(--site-card);
-  color: var(--site-ink);
-  cursor: pointer;
-  font-family: var(--verso-structure-font-family);
-}
-
-.graph-legend {
-  color: var(--site-muted);
-  font-size: 0.92rem;
-  margin: 0.2rem 0 0.9rem;
-}
-
-.graph-layout {
-  display: grid;
-  gap: 1rem;
-  grid-template-columns: minmax(0, 1fr) 18rem;
-}
-
-.graph-panel {
-  background: rgba(255, 253, 248, 0.92);
-  border: 1px solid var(--site-border);
-  border-radius: 14px;
-  padding: 0.9rem 1rem;
-}
-
-.graph-panel h2 {
-  margin-top: 0;
-}
-
-.graph-hint {
-  color: var(--site-muted);
-  font-size: 0.92rem;
-  margin-bottom: 0.8rem;
-}
-
-#graph-svg {
-  cursor: grab;
-}
-
-.graph-panel code {
-  font-size: 0.9rem;
-}
-
-.graph-neighbor-list {
-  margin: 0.7rem 0 0;
-  padding-left: 1.1rem;
-}
-
-.graph-neighbor-list li {
-  margin-bottom: 0.35rem;
-}
-
-@media (max-width: 900px) {
-  .graph-layout {
-    grid-template-columns: 1fr;
-  }
-}
-"
-
-def graphJs : String := "
-document.addEventListener('DOMContentLoaded', () => {
-  const root = document.getElementById('graph-root');
-  const dataNode = document.getElementById('graph-data');
-  if (!root || !dataNode || !window.d3) return;
-
-  const graph = JSON.parse(dataNode.textContent);
-  const groups = [...new Set(graph.nodes.map(node => node.groupKey))].sort();
-  const groupOptions = groups.map(group => `<option value=\"${group}\">${group}</option>`).join('');
-  root.innerHTML = `
-    <div class=\"graph-toolbar\">
-      <input id=\"graph-filter\" type=\"search\" placeholder=\"Filter declarations by name or module\" />
-      <select id=\"graph-group\">
-        <option value=\"\">All chapters</option>
-        ${groupOptions}
-      </select>
-      <button id=\"graph-fit\" type=\"button\">Fit view</button>
-      <button id=\"graph-clear\" type=\"button\">Clear focus</button>
-    </div>
-    <p class=\"graph-hint\">Scroll to zoom, drag the background to pan, click a node to focus its neighborhood, and double-click a node to open its page.</p>
-    <p class=\"graph-legend\">Node fill colors mark chapters. Green outlines are kernel-checked; rust outlines contain sorry.</p>
-    <div class=\"graph-layout\">
-      <svg id=\"graph-svg\" width=\"100%\" height=\"720\"></svg>
-      <aside id=\"graph-panel\" class=\"graph-panel\">
-        <h2>Graph</h2>
-        <p>Use search or click a node to focus its local neighborhood.</p>
-      </aside>
-    </div>
-  `;
-
-  const svg = d3.select('#graph-svg');
-  const panel = document.getElementById('graph-panel');
-  const filterInput = document.getElementById('graph-filter');
-  const groupSelect = document.getElementById('graph-group');
-  const fitButton = document.getElementById('graph-fit');
-  const clearButton = document.getElementById('graph-clear');
-  const width = Math.max(960, root.clientWidth - 32);
-  const height = 720;
-  svg.attr('viewBox', [0, 0, width, height]);
-  const canvas = svg.append('g').attr('class', 'graph-canvas');
-
-  let nodes = graph.nodes.map(n => ({...n}));
-  let edges = graph.edges.map(e => ({...e}));
-  const nodeById = new Map(nodes.map(node => [node.id, node]));
-  const outgoing = new Map(nodes.map(node => [node.id, []]));
-  const incoming = new Map(nodes.map(node => [node.id, []]));
-  const degree = new Map(nodes.map(node => [node.id, 0]));
-  for (const edge of edges) {
-    degree.set(edge.source, (degree.get(edge.source) || 0) + 1);
-    degree.set(edge.target, (degree.get(edge.target) || 0) + 1);
-    outgoing.get(edge.source)?.push(edge.target);
-    incoming.get(edge.target)?.push(edge.source);
-  }
-
-  const palette = ['#3d6b59', '#b96d2d', '#7a4e7a', '#2f5f87', '#8a3b3b', '#5f6f2e', '#9a5b8f', '#6b5041'];
-  const color = d3.scaleOrdinal(groups, groups.map((_, index) => palette[index % palette.length]));
-  const cols = Math.max(1, Math.ceil(Math.sqrt(groups.length)));
-  const rows = Math.max(1, Math.ceil(groups.length / cols));
-  const groupCenters = new Map(groups.map((group, index) => {
-    const col = index % cols;
-    const row = Math.floor(index / cols);
-    return [group, {
-      x: width * ((col + 0.5) / cols),
-      y: height * ((row + 0.5) / rows)
-    }];
-  }));
-
-  const simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(edges).id(d => d.id).distance(80).strength(0.2))
-    .force('charge', d3.forceManyBody().strength(-210))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('x', d3.forceX(d => groupCenters.get(d.groupKey)?.x || width / 2).strength(0.08))
-    .force('y', d3.forceY(d => groupCenters.get(d.groupKey)?.y || height / 2).strength(0.08))
-    .force('collision', d3.forceCollide(22));
-
-  const zoom = d3.zoom()
-    .scaleExtent([0.25, 4])
-    .on('zoom', event => {
-      canvas.attr('transform', event.transform);
-    });
-  svg.call(zoom);
-
-  const link = canvas.append('g')
-    .attr('stroke', '#b8b0a4')
-    .attr('stroke-opacity', 0.6)
-    .selectAll('line')
-    .data(edges)
-    .join('line')
-    .attr('stroke-width', 1.2);
-
-  const node = canvas.append('g')
-    .selectAll('g')
-    .data(nodes)
-    .join('g')
-    .attr('class', 'graph-node')
-    .style('cursor', 'pointer');
-
-  const radius = d => 8 + Math.min(6, Math.floor((degree.get(d.id) || 0) / 3));
-  const circles = node.append('circle')
-    .attr('r', radius)
-    .attr('fill', d => color(d.groupKey))
-    .attr('stroke', d => d.status === 'sorry' ? '#a14d2a' : '#1f6b4b')
-    .attr('stroke-width', 2.2);
-
-  node.append('title')
-    .text(d => `${d.kind}: ${d.id}\\n${d.moduleName}`);
-
-  const labels = node.append('text')
-    .attr('class', 'graph-label')
-    .text(d => d.label)
-    .attr('x', 14)
-    .attr('y', 4)
-    .attr('font-size', 10)
-    .attr('fill', '#193428')
-    .style('display', 'none');
-
-  const formatNeighborList = (title, ids) => {
-    if (!ids || ids.length === 0) {
-      return `<p><strong>${title}:</strong> none in the exposed graph.</p>`;
-    }
-    const items = ids.slice(0, 10).map(id => {
-      const node = nodeById.get(id);
-      return `<li><a href=\"${node.href}\"><code>${node.label}</code></a></li>`;
-    }).join('');
-    const extra = ids.length > 10 ? `<p>Showing 10 of ${ids.length}.</p>` : '';
-    return `<p><strong>${title}:</strong></p><ul class=\"graph-neighbor-list\">${items}</ul>${extra}`;
-  };
-
-  const setDefaultPanel = visibleCount => {
-    panel.innerHTML = `
-      <h2>Graph</h2>
-      <p>${visibleCount} declarations are visible in the current filter.</p>
-      <p>Select a node to inspect its module and immediate dependencies.</p>
-    `;
-  };
-
-  const zoomToBounds = visibleNodes => {
-    const positioned = visibleNodes.filter(node =>
-      Number.isFinite(node.x) && Number.isFinite(node.y));
-    if (positioned.length === 0) return;
-    const minX = d3.min(positioned, node => node.x);
-    const maxX = d3.max(positioned, node => node.x);
-    const minY = d3.min(positioned, node => node.y);
-    const maxY = d3.max(positioned, node => node.y);
-    const boxWidth = Math.max(120, maxX - minX + 80);
-    const boxHeight = Math.max(120, maxY - minY + 80);
-    const scale = Math.max(0.3, Math.min(2.4, 0.9 / Math.max(boxWidth / width, boxHeight / height)));
-    const tx = width / 2 - scale * ((minX + maxX) / 2);
-    const ty = height / 2 - scale * ((minY + maxY) / 2);
-    svg.transition().duration(250).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
-  };
-
-  let activeQuery = '';
-  let activeGroup = '';
-  let selectedId = null;
-
-  const filteredIds = () => new Set(
-    nodes
-      .filter(node => {
-        const matchesGroup = activeGroup === '' || node.groupKey === activeGroup;
-        const haystack = `${node.id} ${node.moduleName}`.toLowerCase();
-        const matchesQuery = activeQuery === '' || haystack.includes(activeQuery);
-        return matchesGroup && matchesQuery;
-      })
-      .map(node => node.id)
-  );
-
-  const neighborhoodIds = () => {
-    if (!selectedId) return null;
-    const ids = new Set([selectedId]);
-    for (const dep of outgoing.get(selectedId) || []) ids.add(dep);
-    for (const user of incoming.get(selectedId) || []) ids.add(user);
-    return ids;
-  };
-
-  const updatePanel = visible => {
-    if (!selectedId) {
-      setDefaultPanel(visible.size);
-      return;
-    }
-    const selected = nodeById.get(selectedId);
-    const deps = outgoing.get(selectedId) || [];
-    const usedBy = incoming.get(selectedId) || [];
-    panel.innerHTML = `
-      <h2>${selected.label}</h2>
-      <p><strong>Kind:</strong> ${selected.kind}</p>
-      <p><strong>Status:</strong> ${selected.status}</p>
-      <p><strong>Chapter:</strong> <code>${selected.groupKey}</code></p>
-      <p><strong>Module:</strong> <code>${selected.moduleName}</code></p>
-      <p><a class=\"decl-card-action\" href=\"${selected.href}\">Open declaration</a></p>
-      ${formatNeighborList('Uses', deps)}
-      ${formatNeighborList('Used by', usedBy)}
-    `;
-  };
-
-  const updateVisibility = () => {
-    const visible = filteredIds();
-    if (selectedId && !visible.has(selectedId)) selectedId = null;
-    const neighborhood = neighborhoodIds();
-
-    node
-      .style('display', d => visible.has(d.id) ? null : 'none')
-      .style('opacity', d => {
-        if (!visible.has(d.id)) return 0;
-        if (!neighborhood) return 1;
-        return neighborhood.has(d.id) ? 1 : 0.15;
-      });
-
-    labels
-      .style('display', d => {
-        if (!visible.has(d.id)) return 'none';
-        if (neighborhood) return neighborhood.has(d.id) ? null : 'none';
-        return activeQuery === '' ? 'none' : null;
-      });
-
-    circles
-      .attr('stroke-width', d => d.id === selectedId ? 4 : 2.2)
-      .attr('r', d => d.id === selectedId ? radius(d) + 2 : radius(d));
-
-    link
-      .style('display', d => {
-        const source = typeof d.source === 'object' ? d.source.id : d.source;
-        const target = typeof d.target === 'object' ? d.target.id : d.target;
-        return visible.has(source) && visible.has(target) ? null : 'none';
-      })
-      .style('opacity', d => {
-        const source = typeof d.source === 'object' ? d.source.id : d.source;
-        const target = typeof d.target === 'object' ? d.target.id : d.target;
-        if (!visible.has(source) || !visible.has(target)) return 0;
-        if (!neighborhood) return 0.45;
-        return neighborhood.has(source) && neighborhood.has(target) ? 0.9 : 0.05;
-      })
-      .attr('stroke', d => {
-        const source = typeof d.source === 'object' ? d.source.id : d.source;
-        const target = typeof d.target === 'object' ? d.target.id : d.target;
-        return selectedId && (source === selectedId || target === selectedId) ? '#a14d2a' : '#b8b0a4';
-      });
-
-    updatePanel(visible);
-    return visible;
-  };
-
-  const drag = d3.drag()
-    .on('start', (event, d) => {
-      if (!event.active) simulation.alphaTarget(0.2).restart();
-      d.fx = d.x;
-      d.fy = d.y;
-    })
-    .on('drag', (event, d) => {
-      d.fx = event.x;
-      d.fy = event.y;
-    })
-    .on('end', (event, d) => {
-      if (!event.active) simulation.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
-    });
-
-  node.call(drag);
-
-  node.on('click', (event, d) => {
-    event.preventDefault();
-    selectedId = d.id == selectedId ? null : d.id;
-    updateVisibility();
-    if (selectedId) {
-      const neighborhood = neighborhoodIds() || new Set();
-      zoomToBounds(nodes.filter(node => neighborhood.has(node.id)));
-    }
-  });
-
-  node.on('dblclick', (event, d) => {
-    event.preventDefault();
-    window.location.href = d.href;
-  });
-
-  simulation.on('tick', () => {
-    link
-      .attr('x1', d => d.source.x)
-      .attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x)
-      .attr('y2', d => d.target.y);
-
-    node.attr('transform', d => `translate(${d.x},${d.y})`);
-  });
-
-  filterInput.addEventListener('input', event => {
-    activeQuery = event.target.value.trim().toLowerCase();
-    updateVisibility();
-  });
-
-  groupSelect.addEventListener('change', event => {
-    activeGroup = event.target.value;
-    updateVisibility();
-  });
-
-  fitButton.addEventListener('click', () => {
-    const visible = updateVisibility();
-    const neighborhood = neighborhoodIds();
-    zoomToBounds(nodes.filter(node => visible.has(node.id) && (!neighborhood || neighborhood.has(node.id))));
-  });
-
-  clearButton.addEventListener('click', () => {
-    selectedId = null;
-    const visible = updateVisibility();
-    zoomToBounds(nodes.filter(node => visible.has(node.id)));
-  });
-
-  svg.on('dblclick', event => {
-    if (event.target === svg.node()) {
-      selectedId = null;
-      const visible = updateVisibility();
-      zoomToBounds(nodes.filter(node => visible.has(node.id)));
-    }
-  });
-
-  setDefaultPanel(nodes.length);
-  setTimeout(() => {
-    const visible = updateVisibility();
-    zoomToBounds(nodes.filter(node => visible.has(node.id)));
-  }, 800);
-});
-"
-
-private def tocJs : String := "
-document.addEventListener('DOMContentLoaded', () => {
-  const toc = document.getElementById('toc');
-  if (!toc) return;
-  const key = 'lean-exposition:toc-collapsed';
-  const utilityLinks = [
-    { slug: 'context', label: 'Overview', href: 'context/' },
-    { slug: 'trusted-base', label: 'TFB', href: 'trusted-base/' },
-    { slug: 'graph', label: 'Graph', href: 'graph/' }
-  ];
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'site-toc-toggle';
-
-  const isDesktop = () => window.matchMedia('(min-width: 701px)').matches;
-
-  const normalizeHref = href => {
-    if (!href) return '';
-    try {
-      const url = new URL(href, document.baseURI);
-      let path = url.pathname;
-      if (path.endsWith('index.html')) path = path.slice(0, -'index.html'.length);
-      return path.endsWith('/') ? path : `${path}/`;
-    } catch (_err) {
-      return href;
-    }
-  };
-
-  const matchesUtility = (href, slug) => {
-    const normalized = normalizeHref(href);
-    return normalized === `/${slug}/` || normalized.endsWith(`/${slug}/`);
-  };
-
-  const buildUtilityNav = () => {
-    toc.querySelector('.site-utility-nav')?.remove();
-    const nav = document.createElement('nav');
-    nav.className = 'site-utility-nav';
-    nav.setAttribute('aria-label', 'Reader guides');
-    for (const link of utilityLinks) {
-      const item = document.createElement('a');
-      item.className = 'site-utility-link';
-      item.href = link.href;
-      item.textContent = link.label;
-      nav.appendChild(item);
-    }
-    const container = toc.querySelector('.first') || toc;
-    const beforeNode = container.querySelector('.split-tocs');
-    if (beforeNode) {
-      container.insertBefore(nav, beforeNode);
-    } else {
-      container.appendChild(nav);
-    }
-  };
-
-  const pruneUtilityEntries = () => {
-    toc.querySelectorAll('.split-toc:not(.book)').forEach(block => {
-      block.remove();
-    });
-    toc.querySelectorAll('.split-toc').forEach(block => {
-      const titleLink = block.querySelector('.title a');
-      const href = titleLink?.getAttribute('href') || '';
-      if (utilityLinks.some(link => matchesUtility(href, link.slug))) {
-        block.remove();
-      }
-    });
-    toc.querySelectorAll('tr').forEach(row => {
-      const href = row.querySelector('a')?.getAttribute('href') || '';
-      if (utilityLinks.some(link => matchesUtility(href, link.slug))) {
-        row.remove();
-      }
-    });
-  };
-
-  const applyState = collapsed => {
-    document.body.classList.toggle('site-toc-collapsed', collapsed);
-    button.textContent = collapsed ? 'Show Contents' : 'Hide Contents';
-    button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  };
-
-  let collapsed = false;
-  try {
-    collapsed = window.localStorage.getItem(key) === 'true';
-  } catch (_err) {
-    collapsed = false;
-  }
-  buildUtilityNav();
-  pruneUtilityEntries();
-  applyState(collapsed);
-
-  button.addEventListener('click', () => {
-    collapsed = !document.body.classList.contains('site-toc-collapsed');
-    try {
-      window.localStorage.setItem(key, String(collapsed));
-    } catch (_err) {
-    }
-    applyState(collapsed);
-  });
-
-  const container = toc.querySelector('.first') || toc;
-  const beforeNode = container.querySelector('.split-tocs');
-  if (beforeNode) {
-    container.insertBefore(button, beforeNode);
-  } else {
-    container.appendChild(button);
-  }
-});
-"
-
-block_extension Block.declCard (_payload : DeclCardData) where
-  data := ToJson.toJson _payload
-  traverse _ _ _ _ := pure none
-  toTeX := some fun _goI goB _id _data contents => contents.mapM goB
-  toHtml := some fun _goI goB _id data contents => do
-    let .ok (payload : DeclCardData) := FromJson.fromJson? data
-      | HtmlT.logError s!"Could not decode declaration card data from {data.compress}"
-        pure .empty
-    let tags :=
-      payload.tags.map fun tag =>
-        let className :=
-          if tag == "TFB" then "decl-card-tag tfb" else "decl-card-tag sorry"
-        {{<span class={{className}}>{{tag}}</span>}}
-    let tagsHtml :=
-      if payload.tags.isEmpty then
-        .empty
-      else
-        {{<div class="decl-card-tags">{{tags}}</div>}}
-    pure {{
-      <section class="decl-section">
-        <h2 id={{payload.anchorId}} class="decl-heading">
-          <code>{{payload.shortName}}</code>
-          <a class="decl-permalink" href={{s!"#{payload.anchorId}"}} title="Permalink">"🔗"</a>
-        </h2>
-        <div class="decl-card">
-          <div class="decl-card-header">
-            <div class="decl-card-title">
-              <span class="decl-card-label">{{payload.kindLabel}}</span>
-              <code class="decl-card-name">{{payload.fullName}}</code>
-            </div>
-            <div class="decl-card-tagbar">{{tagsHtml}}</div>
-          </div>
-          <div class="decl-card-body">
-            {{← contents.mapM goB}}
-          </div>
-        </div>
-      </section>
-    }}
-
-block_extension Block.details (_payload : DetailsData) where
-  data := ToJson.toJson _payload
-  traverse _ _ _ _ := pure none
-  toTeX := some fun _goI goB _id _data contents => contents.mapM goB
-  toHtml := some fun _goI goB _id data contents => do
-    let .ok (payload : DetailsData) := FromJson.fromJson? data
-      | HtmlT.logError s!"Could not decode details block data from {data.compress}"
-        pure .empty
-    pure {{
-      <details>
-        <summary>{{payload.summary}}</summary>
-        {{← contents.mapM goB}}
-      </details>
-    }}
-
-block_extension Block.graph (_payload : GraphData) where
-  data := ToJson.toJson _payload
-  traverse _ _ _ _ := pure none
-  toTeX := some fun _ _ _ _ _ => pure .empty
-  toHtml := some fun _ _ _ data _ => do
-    let .ok (payload : GraphData) := FromJson.fromJson? data
-      | HtmlT.logError s!"Could not decode graph data from {data.compress}"
-        pure .empty
-    pure {{
-      <div id="graph-root"></div>
-      {{Html.tag "script" #[("id", "graph-data"), ("type", "application/json")] (.text false (ToJson.toJson payload).compress)}}
-    }}
-
-private def renderConfig : RenderConfig :=
-  {
-    emitTeX := false
-    emitHtmlSingle := .no
-    emitHtmlMulti := .immediately
-    htmlDepth := 2
-    rootTocDepth := some 1
-    sectionTocDepth := some 1
-    extraCss := [customCss]
-    extraJs := [graphJs, tocJs]
-    extraHead := #[
-      Html.tag "script" #[("src", "https://d3js.org/d3.v7.min.js")] .empty
-    ]
-  }
-
-private def countSorries (decls : Array DeclInfo) : Nat :=
-  decls.foldl (fun n decl => n + if decl.hasSorry then 1 else 0) 0
-
-private def countDecls (groups : Array GroupInfo) : Nat :=
-  groups.foldl (fun n group =>
-    n + group.modules.foldl (fun inner modInfo => inner + modInfo.decls.size) 0) 0
-
-private def mkDashboardBlocks (groups : Array GroupInfo) : Array (Block Manual) :=
-  groups.foldl (fun acc group =>
-    let groupTotal := group.modules.foldl (fun n modInfo => n + modInfo.decls.size) 0
-    let groupSorry := group.modules.foldl (fun n modInfo => n + countSorries modInfo.decls) 0
-    let intro : Block Manual :=
-      .para #[
-        .bold #[.link #[.text <| humanizeWord group.key] (groupHrefOf group.key)],
-        .text s!"  ({groupTotal} declarations, {groupSorry} with sorry)"
-      ]
-    let items := group.modules.map fun modInfo =>
-      Verso.Doc.ListItem.mk #[
-        .para #[
-          .link #[.code modInfo.path] s!"{groupHrefOf group.key}{moduleHrefOf modInfo.path}",
-          .text s!"  ({modInfo.decls.size} declarations, {countSorries modInfo.decls} with sorry)"
-        ]
-      ]
-    acc ++ #[intro, .ul items]
-  ) #[]
-
-private def mkReaderGuideBlocks (hasContext hasTfb : Bool) : Array (Block Manual) :=
-  let contextItems :=
-    if hasContext then
-      #[Verso.Doc.ListItem.mk #[
-        .para #[
-          .bold #[.link #[.text "Overview"] "context/"],
-          .text " explains the repository scope and mathematical target."
-        ]
-      ]]
-    else
-      #[]
-  let tfbItems :=
-    if hasTfb then
-      #[Verso.Doc.ListItem.mk #[
-        .para #[
-          .bold #[.link #[.text "Trusted Formalization Base"] "trusted-base/"],
-          .text " shows the declarations a reader must trust for the comparator-facing theorem."
-        ]
-      ]]
-    else
-      #[]
-  let graphItems := #[Verso.Doc.ListItem.mk #[
-    .para #[
-      .bold #[.link #[.text "Dependency Graph"] "graph/"],
-      .text " provides the interactive dependency view."
-    ]
-  ]]
-  let items := contextItems ++ tfbItems ++ graphItems
-  if items.isEmpty then
-    #[]
+  let stableEntries := entries.qsort (shadowEntryLt order)
+  let solutionEntries := stableEntries.filter fun entry => entry.tags.contains "solution"
+  let solutionNames : Std.HashSet Name :=
+    solutionEntries.foldl (fun acc entry => acc.insert entry.name) {}
+  let tfbEntries :=
+    stableEntries.filter fun entry => entry.tags.contains "tfb" && !solutionNames.contains entry.name
+  let otherEntries :=
+    stableEntries.filter fun entry =>
+      !entry.tags.contains "solution" && !entry.tags.contains "tfb"
+  pure <|
+    solutionEntries
+      ++ flattenShadowLayers (shadowTopologicalLayers order tfbEntries)
+      ++ otherEntries
+
+private def anchorStartLine (anchor : String) : String :=
+  s!"-- ANCHOR: {anchor}"
+
+private def anchorEndLine (anchor : String) : String :=
+  s!"-- ANCHOR_END: {anchor}"
+
+private def snippetFromSourceLines (lines : Array String) (startLine endLine : Nat) : String :=
+  if startLine == 0 then
+    ""
   else
-    #[
-      .para #[.bold #[.text "Reader guides"]],
-      .ul items
-    ]
-
-private def mkTrustedBaseIndexBlocks (groups : Array GroupInfo) : Array (Block Manual) :=
-  if groups.isEmpty then
-    #[]
-  else
-    #[.para #[.bold #[.text "Browse the trusted base by chapter."]]]
-    ++ groups.foldl (fun acc group =>
-      let groupTotal := group.modules.foldl (fun n modInfo => n + modInfo.decls.size) 0
-      let moduleItems := group.modules.map fun modInfo =>
-        let declLinks := modInfo.decls.map fun decl =>
-          { label := decl.name.getString!
-            href? := some <| pathForTrustedBasePart group.key modInfo.path decl.name }
-        let linkBlock? :=
-          if declLinks.isEmpty then
-            none
-          else
-            let entries := declLinks.toList.map fun link => #[mkCodeLink link]
-            some <| .para <| joinInlines entries #[.text " · "]
-        let blocks : Array (Block Manual) := #[
-          .para #[
-            .bold #[.link #[.code modInfo.path] s!"{trustedBaseGroupHrefOf group.key}{trustedBaseModuleHrefOf modInfo.path}"],
-            .text s!" ({modInfo.decls.size} declarations)"
-          ]
-        ]
-        let blocks :=
-          match linkBlock? with
-          | some linkBlock => blocks.push linkBlock
-          | none => blocks
-        Verso.Doc.ListItem.mk blocks
-      acc.push <| .other (Block.details {
-        summary := s!"{humanizeWord group.key} ({groupTotal} declarations)"
-      }) #[
-        .para #[
-          .text "Chapter page: ",
-          .link #[.text <| humanizeWord group.key] (trustedBaseGroupHrefOf group.key)
-        ],
-        .ul moduleItems
-      ]
-    ) #[]
-
-private def mkDeclBlock (decl : DeclInfo) (repoUrl? : Option String)
-    (declHrefs : Std.HashMap Name String) : Block Manual :=
-  Id.run do
-    let issueUrl := issueUrlOf repoUrl? decl.name decl.moduleName decl.source? decl.hasSorry
-    let sourceUrl := sourceUrlOf repoUrl? decl.source?
-    let depLinks := decl.deps.filterMap fun dep =>
-      declHrefs.get? dep |>.map fun href => { label := dep.getString!, href? := some href }
-    let usedByLinks := decl.usedBy.filterMap fun dep =>
-      declHrefs.get? dep |>.map fun href => { label := dep.getString!, href? := some href }
-    let mut blocks : Array (Block Manual) := #[]
-    blocks := blocks ++ decl.docBlocks
-    let hasDoc := !decl.docBlocks.isEmpty
-    if !hasDoc then
-      blocks := blocks.push (.para #[.emph #[.text "No docstring."]])
-    blocks := blocks.push (.para #[.bold #[.text "Statement"]])
-    blocks := blocks.push (.code decl.displaySignature)
-    if let some block := depListBlock depLinks then
-      blocks := blocks.push <| .other (Block.details { summary := s!"Uses ({depLinks.size})" }) #[block]
-    if let some block := depListBlock usedByLinks then
-      blocks := blocks.push <| .other (Block.details { summary := s!"Used by ({usedByLinks.size})" }) #[block]
-    if let some block := mkLinkParagraph sourceUrl issueUrl then
-      blocks := blocks.push block
-    if let some proof := decl.proofText? then
-      blocks := blocks.push <| .other (Block.details { summary := "Proof" }) #[.code proof]
-    let cardData : DeclCardData := {
-      anchorId := anchorIdOf decl.name
-      shortName := decl.name.getString!
-      kindLabel := decl.kind.label
-      fullName := decl.name.toString
-      tags := #[
-        if decl.dependsOnSorry then some "depends transitively on sorry" else none,
-        if decl.inTfb then some "TFB" else none
-      ].filterMap id
-    }
-    .other (Block.declCard cardData) blocks
-
-private def mkModulePart (moduleInfo : ModuleInfo) (repoUrl? : Option String)
-    (declHrefs : Std.HashMap Name String) : Part Manual :=
-  {
-    title := #[.text moduleInfo.path]
-    titleString := moduleInfo.path
-    metadata := some {
-      file := some s!"module-{slugify moduleInfo.path}"
-      tag := some (.provided moduleInfo.name.toString)
-      shortTitle := some moduleInfo.path
-    }
-    content := #[
-      .para #[
-        .text "Module ",
-        .code moduleInfo.name.toString,
-        .text s!" contains {moduleInfo.decls.size} exposed declarations."
-      ]
-    ] ++ moduleInfo.decls.map (fun decl => mkDeclBlock decl repoUrl? declHrefs)
-    subParts := #[]
-  }
-
-private def mkTrustedBaseModulePart (moduleInfo : ModuleInfo) (repoUrl? : Option String)
-    (declHrefs : Std.HashMap Name String) : Part Manual :=
-  {
-    title := #[.text moduleInfo.path]
-    titleString := moduleInfo.path
-    metadata := some {
-      file := some s!"tfb-module-{slugify moduleInfo.path}"
-      tag := some (.provided s!"tfb-{moduleInfo.name}")
-      shortTitle := some moduleInfo.path
-    }
-    content := #[
-      .para #[
-        .text "Module ",
-        .code moduleInfo.name.toString,
-        .text s!" contributes {moduleInfo.decls.size} declarations to the trusted formalization base."
-      ]
-    ] ++ moduleInfo.decls.map (fun decl => mkDeclBlock decl repoUrl? declHrefs)
-    subParts := #[]
-  }
-
-private def mkGroupPart (group : GroupInfo) (repoUrl? : Option String)
-    (declHrefs : Std.HashMap Name String) : Part Manual :=
-  let title := humanizeWord group.key
-  {
-    title := #[.text title]
-    titleString := title
-    metadata := some {
-      file := some s!"chapter-{slugify group.key}"
-      shortTitle := some title
-      tag := some (.provided group.key)
-    }
-    content := #[
-      .para #[.text s!"Modules in the {title} slice are grouped from the first path component after the project root."]
-    ]
-    subParts := group.modules.map fun moduleInfo => mkModulePart moduleInfo repoUrl? declHrefs
-  }
-
-private def mkTrustedBaseGroupPart (group : GroupInfo) (repoUrl? : Option String)
-    (declHrefs : Std.HashMap Name String) : Part Manual :=
-  let title := humanizeWord group.key
-  {
-    title := #[.text title]
-    titleString := title
-    metadata := some {
-      file := some s!"tfb-chapter-{slugify group.key}"
-      shortTitle := some title
-      tag := some (.provided s!"tfb-{group.key}")
-    }
-    content := #[
-      .para #[.text s!"Modules in the {title} slice that contribute declarations to the trusted formalization base."]
-    ]
-    subParts := group.modules.map fun moduleInfo => mkTrustedBaseModulePart moduleInfo repoUrl? declHrefs
-  }
-
-private def mkTrustedBasePart (groups : Array GroupInfo) (repoUrl? : Option String)
-    (declHrefs : Std.HashMap Name String) (targetBlocks : Array (Block Manual)) : Part Manual :=
-  let declCount := countDecls groups
-  let moduleCount := groups.foldl (fun n group => n + group.modules.size) 0
-  let intro :=
-    if declCount == 0 then
-      #[.para #[.text "No exposed declarations were collected into the trusted formalization base from the comparator targets."]]
+    let stop := min endLine lines.size
+    if startLine > stop then
+      ""
     else
-      #[.para #[.text s!"This view collects the {declCount} exposed declarations across {moduleCount} modules that are reachable from the comparator target theorem statements."]]
-  {
-    title := #[.text "Trusted Formalization Base"]
-    titleString := "Trusted Formalization Base"
-    metadata := some {
-      file := some "trusted-base"
-      shortTitle := some "TFB"
-      tag := some (.provided "trusted-base")
-      number := false
-    }
-    content := #[
-        .para #[.text "These are the exposed declarations a reader must trust in order to accept the comparator-facing theorem."]
-      ]
-      ++ targetBlocks
-      ++ intro
-      ++ mkTrustedBaseIndexBlocks groups
-      ++ mkDashboardBlocks groups
-    subParts := groups.map fun group => mkTrustedBaseGroupPart group repoUrl? declHrefs
-  }
+      let startIdx := startLine - 1
+      let selected := (List.range (stop - startIdx)).map fun i => lines[startIdx + i]!
+      String.intercalate "\n" selected
 
-private def mkGraphPart (decls : Array DeclInfo) (declHrefs : Std.HashMap Name String) : Part Manual :=
-  let nodes := decls.map fun decl => {
-    id := decl.name.toString
-    label := decl.name.getString!
-    kind := decl.kind.label
-    status := if decl.hasSorry then "sorry" else "proved"
-    groupKey := decl.groupKey
-    moduleName := decl.modulePath
-    href := declHrefs.getD decl.name (pathForPart decl.groupKey decl.modulePath decl.name)
-  }
-  let edges := decls.foldl (fun acc decl =>
-    acc ++ decl.deps.filterMap (fun dep =>
-      if declHrefs.contains dep then
-        some { source := decl.name.toString, target := dep.toString }
+private def renderShadowSnippet (entry : ShadowEntry) (snippet : String)
+    : Array String := Id.run do
+  let rendered := snippet.trimAsciiEnd.toString
+  let mut out : Array String := #[anchorStartLine entry.anchor]
+  for line in rendered.splitOn "\n" do
+    out := out.push line
+  out.push (anchorEndLine entry.anchor)
+
+private def renderShadowFile (sourceText : String)
+    (entries : Array ShadowEntry) : String := Id.run do
+  let lines := (sourceText.splitOn "\n").toArray
+  let sortedEntries :=
+    entries.qsort fun a b =>
+      if a.source.line == b.source.line then
+        if a.source.endLine == b.source.endLine then
+          a.name.lt b.name
+        else
+          a.source.endLine < b.source.endLine
       else
-        none)) #[]
-  let graphData : GraphData := { nodes, edges }
-  {
-    title := #[.text "Dependency Graph"]
-    titleString := "Dependency Graph"
-    metadata := some {
-      file := some "graph"
-      shortTitle := some "Graph"
-      tag := some (.provided "graph")
-    }
-    content := #[
-      .para #[.text "Interactive dependency view for exposed declarations."],
-      .other (Block.graph graphData) #[]
-    ]
-    subParts := #[]
-  }
+        a.source.line < b.source.line
+  let mut out : Array String := #[]
+  let mut cursor := 1
+  for entry in sortedEntries do
+    while cursor < entry.source.line && cursor <= lines.size do
+      out := out.push lines[cursor - 1]!
+      cursor := cursor + 1
+    let snippet := snippetFromSourceLines lines entry.source.line entry.source.endLine
+    out := out ++ renderShadowSnippet entry snippet
+    cursor := entry.source.endLine + 1
+  while cursor <= lines.size do
+    out := out.push lines[cursor - 1]!
+    cursor := cursor + 1
+  String.intercalate "\n" out.toList
 
-private def mkRootPart (cfg : Cli) (rootPrefix : Name) (groups : Array GroupInfo)
-    (decls : Array DeclInfo) (declHrefs : Std.HashMap Name String)
-    (introBlocks : Array (Block Manual)) (readerGuideBlocks : Array (Block Manual))
-    (extraParts : Array (Part Manual)) : Part Manual :=
-  let title := cfg.siteTitle.getD s!"{rootPrefix} exposition"
-  {
-    title := #[.text title]
-    titleString := title
-    metadata := some {
-      file := some "index"
-      shortTitle := some title
-      number := false
-    }
-    content := #[.para #[.text "Auto-generated exposition for ", .code rootPrefix.toString, .text "."]]
-      ++ introBlocks
-      ++ readerGuideBlocks
-      ++ mkDashboardBlocks groups
-    subParts := (groups.map fun group => mkGroupPart group cfg.repoUrl declHrefs)
-      ++ extraParts
-      ++ #[mkGraphPart decls declHrefs]
+private unsafe def generatedShadowFiles (entries : Array ShadowEntry) : IO (Std.HashMap String String) := do
+  let mut grouped : Std.HashMap String (Array ShadowEntry) := {}
+  for entry in entries do
+    grouped := grouped.insert entry.source.relPath ((grouped.getD entry.source.relPath #[]).push entry)
+  let mut generated : Std.HashMap String String := {}
+  for (relPath, fileEntries) in grouped.toArray do
+    let some first := fileEntries[0]? | continue
+    let sourceText ← IO.FS.readFile first.source.absPath
+    generated := generated.insert relPath (renderShadowFile sourceText fileEntries)
+  pure generated
+
+private def copyFileToShadow (src dst : System.FilePath) : IO Unit := do
+  IO.FS.writeBinFile dst (← IO.FS.readBinFile src)
+
+/-- Remove all top-level entries in `shadowDir` except `.lake` and `.git`. -/
+private def clearShadowDirPreservingLake (shadowDir : System.FilePath) : IO Unit := do
+  for entry in (← shadowDir.readDir) do
+    if entry.fileName ∈ [".lake", ".git"] then
+      continue
+    let ftype ← entry.path.metadata
+    match ftype.type with
+    | .dir => IO.FS.removeDirAll entry.path
+    | _    => IO.FS.removeFile entry.path
+
+/-- Compute the transitive import closure within the project for a set of starting modules. -/
+private partial def moduleImportClosure (projectDir : System.FilePath) (rootPrefix : Name)
+    (startModules : Array Name) : IO (Std.HashSet Name) := do
+  let rec go (stack : List Name) (visited : Std.HashSet Name) : IO (Std.HashSet Name) := do
+    match stack with
+    | [] => return visited
+    | mod :: rest =>
+      if visited.contains mod then
+        go rest visited
+      else
+        let visited := visited.insert mod
+        let text? ← readFileIfExists (moduleSourcePath projectDir mod)
+        match text? with
+        | none => go rest visited
+        | some contents =>
+          let imports := (contents.splitOn "\n").filterMap parseImportedModule?
+          let newImports := imports.filter fun imported =>
+            imported != mod && hasPrefixName imported rootPrefix && !visited.contains imported
+          go (newImports ++ rest) visited
+  go startModules.toList {}
+
+/-- Copy only the modules in `modules` into the shadow directory, using annotated
+    content from `generatedFiles` when available. -/
+private def copySelectiveModules (projectDir shadowDir : System.FilePath)
+    (modules : Std.HashSet Name)
+    (generatedFiles : Std.HashMap String String) : IO Unit := do
+  for mod in modules.toArray do
+    let relPath := mod.toString.replace "." "/" ++ ".lean"
+    let srcPath := projectDir / relPath
+    let dstPath := shadowDir / relPath
+    if let some parent := dstPath.parent then
+      IO.FS.createDirAll parent
+    if let some generated := generatedFiles[relPath]? then
+      IO.FS.writeFile dstPath generated
+    else if ← srcPath.pathExists then
+      copyFileToShadow srcPath dstPath
+
+/-- Copy essential config files (lakefile, toolchain, manifest) from project to shadow. -/
+private def copyShadowConfigFiles (projectDir shadowDir : System.FilePath) : IO Unit := do
+  for name in ["lakefile.toml", "lakefile.lean", "lean-toolchain", "lake-manifest.json"] do
+    let src := projectDir / name
+    if ← src.pathExists then
+      copyFileToShadow src (shadowDir / name)
+
+private def writeShadowManifest (shadowDir : System.FilePath) (tfbInfo : TrustedBaseInfo)
+    (entries : Array ShadowEntry) : IO Unit := do
+  let manifest : ShadowManifest := {
+    comparator? := tfbInfo.comparator?
+    entries
   }
+  IO.FS.writeFile (shadowManifestPath shadowDir) (Json.pretty (ToJson.toJson manifest))
+
+private def hasShadowTag (entry : ShadowEntry) (tag : String) : Bool :=
+  entry.tags.contains tag
+
+private def markdownHeading (level : Nat) (title : String) : String :=
+  s!"{String.ofList (List.replicate level '#')} {title}"
+
+private def shadowTagForEntry (entry : ShadowEntry) : String :=
+  s!"shadow-entry-{slugify entry.moduleName.toString}-{slugify entry.name.toString}-{entry.source.line}-{entry.source.endLine}"
+
+private def appendTaggedHeading (lines : Array String) (level : Nat) (title tag : String) : Array String :=
+  lines
+    |>.push (markdownHeading level title)
+    |>.push "%%%"
+    |>.push s!"tag := \"{tag}\""
+    |>.push "%%%"
+    |>.push ""
+
+private def codeFenceFor (snippet : String) : String :=
+  let rec scan (chars : List Char) (run best : Nat) : Nat :=
+    match chars with
+    | [] => max run best
+    | '`' :: rest => scan rest (run + 1) best
+    | _ :: rest => scan rest 0 (max run best)
+  String.ofList <| List.replicate (max 3 (scan snippet.toList 0 0 + 1)) '`'
+
+private def renderShadowCodeBlock (entry : ShadowEntry) (snippet : String) : Array String :=
+  let fence := codeFenceFor snippet
+  let defSite := if hasShadowTag entry "tfb" then " -defSite" else ""
+  let proofKind := entry.kind == .theorem || entry.kind == .opaque || entry.kind == .instance
+  let blockType := if proofKind then "collapsibleModule" else "module"
+  let config := s!"{fence}{blockType} (module := {entry.moduleName}) (anchor := {entry.anchor}){defSite}"
+  #[
+    config,
+    snippet,
+    fence,
+    ""
+  ]
+
+private def appendShadowEntryBlock (lines : Array String) (level : Nat) (entry : ShadowEntry)
+    (repoUrl? : Option String := none) : IO (Array String) := do
+  let snippet := (← readSourceSnippet entry.source).trimAsciiEnd.toString
+  let sourceLink := match sourceUrlOf repoUrl? (some entry.source) with
+    | some url => s!" | [Source]({url})"
+    | none => ""
+  let issueLink := match issueUrlOf repoUrl? entry.name entry.moduleName (some entry.source) false with
+    | some url => s!" | [Open Issue]({url})"
+    | none => ""
+  pure <|
+    (appendTaggedHeading lines level s!"`{entry.name}`" (shadowTagForEntry entry))
+      ++ #[
+        s!"`{entry.kind.label}` | `{entry.moduleName}`{sourceLink}{issueLink}",
+        ""
+      ]
+      ++ #[
+        "```declAnchorEmbed",
+        entry.name.toString,
+        "```",
+        ""
+      ]
+      ++ renderShadowCodeBlock entry snippet
+
+private def moduleSlug (rootPrefix : Name) (moduleName : Name) : String :=
+  slugify (moduleName.toString.dropPrefix s!"{rootPrefix}.").toString
+
+private def buildShadowGraphData (rootPrefix : Name) (entries : Array ShadowEntry) : GraphData := Id.run do
+  let entryNames : Std.HashSet Name := entries.foldl (fun s e => s.insert e.name) {}
+  let nodes := entries.map fun entry => {
+    id := entry.name.toString
+    label := entry.name.getString!
+    kind := entry.kind.label
+    status := "clean"
+    groupKey := entry.moduleName.toString
+    moduleName := entry.moduleName.toString
+    -- Link to the split module page. The module slug matches what split_pages.py generates.
+    href := s!"{moduleSlug rootPrefix entry.moduleName}/"
+  }
+  let mut edges : Array GraphEdge := #[]
+  for entry in entries do
+    for dep in entry.deps do
+      if entryNames.contains dep then
+        edges := edges.push { source := entry.name.toString, target := dep.toString }
+  return { nodes, edges }
+
+private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInfo)
+    (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none)
+    (trustedBaseRawUrl? : Option String := none) : IO String := do
+  let some comparator := tfbInfo.comparator?
+    | return String.intercalate "\n" [
+        "import VersoManual",
+        "import BridgelandStability",
+        s!"import {comparatorManualSupportModule}",
+        "",
+        "open Verso.Genre Manual",
+        "open Verso.Code.External",
+        s!"open {comparatorManualSupportModule}",
+        "",
+        "set_option maxHeartbeats 2000000",
+        "set_option verso.exampleProject \".\"",
+        "",
+        s!"#doc (Manual) \"{comparatorManualModule}\" =>",
+        "This generated manual requires a comparator configuration."
+      ]
+  let solutionEntries :=
+    entries.filter fun entry => hasShadowTag entry "solution"
+  let tfbEntries :=
+    entries.filter fun entry => hasShadowTag entry "tfb"
+  let solutionNames : Std.HashSet Name :=
+    solutionEntries.foldl (fun acc entry => acc.insert entry.name) {}
+  let tfbOnlyEntries :=
+    tfbEntries.filter fun entry => !solutionNames.contains entry.name
+  -- Collect per-module declaration counts for the overview
+  let mut moduleCounts : Std.HashMap Name Nat := {}
+  for entry in tfbOnlyEntries do
+    moduleCounts := moduleCounts.insert entry.moduleName ((moduleCounts.getD entry.moduleName 0) + 1)
+  let mut lines : Array String := #[
+    "import VersoManual",
+    s!"import {comparator.solutionModule}",
+    s!"import {comparatorManualSupportModule}",
+    "",
+    "open Verso.Genre Manual",
+    "open Verso.Code.External",
+    s!"open {comparatorManualSupportModule}",
+    "",
+    "set_option pp.rawOnError true",
+    "set_option maxHeartbeats 2000000",
+    "set_option verso.exampleProject \".\"",
+    "",
+    let rootName := rootPrefix.toString
+    s!"#doc (Manual) \"{rootName} Comparator Manual\" =>",
+    "%%%",
+    "htmlSplit := .never",
+    "%%%",
+    "",
+    "# Overview",
+    "",
+    "![comparator](badge/comparator.svg)",
+    ""
+  ]
+  if let some url := repoUrl? then
+    lines := lines.push s!"Repository: [{url}]({url})"
+    lines := lines.push ""
+  if let some tfbUrl := trustedBaseRawUrl? then
+    -- live.lean-lang.org parses hash-fragment args with decodeURIComponent,
+    -- so the `url=` value must be passed raw (no percent-encoding).
+    let liveUrl := s!"https://live.lean-lang.org/#project=mathlib-stable&url={tfbUrl}"
+    lines := lines.push s!"Trusted base: [open `trusted_base.lean` in the Lean 4 Web Editor]({liveUrl})"
+    lines := lines.push ""
+  lines := lines ++ #[
+    "This manual presents the comparator view of the formalization.",
+    s!"It was generated mechanically from the trusted formalization base walk rooted at the comparator target theorem in `{comparator.solutionModule}`.",
+    s!"The formalization covers *{entries.size}* declarations across *{moduleCounts.size}* modules.",
+    ""
+  ]
+  -- Solution theorem (## stays on overview page)
+  if !solutionEntries.isEmpty then
+    for entry in solutionEntries do
+      lines ← appendShadowEntryBlock lines 2 entry repoUrl?
+
+  -- Declaration census: all deps including aux, with resolution
+  lines := lines.push "## Declaration census"
+  lines := lines.push ""
+  lines := lines.push "Every constant in the transitive closure of the target theorem's type."
+  lines := lines.push "Auxiliary declarations are resolved to their user-facing parent."
+  lines := lines.push ""
+  for target in comparator.theoremNames do
+    if let some ci := env.find? target then
+      let rawDeps := Stan.collectDeps env target ci
+      let sorted := rawDeps.toArray.qsort Name.lt
+      let mut resolvedUserSet : Std.HashSet Name := {}
+      let mut auxCount := 0
+      for dep in sorted do
+        let resolved := Stan.resolveToUser env dep
+        if (Stan.classifyNonUser env resolved).isNone then
+          resolvedUserSet := resolvedUserSet.insert resolved
+        else
+          auxCount := auxCount + 1
+      let userCount := resolvedUserSet.size
+      lines := lines.push s!"*{sorted.size}* raw constants: *{userCount}* user-facing, *{auxCount}* auxiliary."
+      lines := lines.push ""
+      for dep in sorted do
+        let classification := Stan.classifyNonUser env dep
+        let resolved := Stan.resolveToUser env dep
+        let kind := match classification with
+          | none => "user"
+          | some (.isProjection _) => "projection"
+          | some (.isCtor _) => "constructor"
+          | some (.isRec _) => "recursor"
+          | some (.isAuxRec) => "aux recursor"
+          | some (.isNoConf) => "noConfusion"
+          | some (.isMatcher) => "matcher"
+          | some (.isCtorIdx _) => "ctorIdx"
+          | some (.isEqnLemma _) => "eqn lemma"
+          | some (.isReserved) => "reserved"
+          | some (.isCtorDeriv _) => "ctor derivative"
+          | some (.isNoConfTy) => "noConfusionType"
+          | some (.isInternal) => "internal"
+          | some (.isImplDetail) => "impl detail"
+          | some (.isQuot) => "quotient"
+        if classification.isNone then
+          lines := lines.push s!" * `{dep}` — user"
+        else
+          lines := lines.push s!" * `{dep}` — {kind} → `{resolved}`"
+  lines := lines.push ""
+  -- Dependency graph (## stays on overview page)
+  let graphData := buildShadowGraphData rootPrefix entries
+  let graphJson := Json.compress (ToJson.toJson graphData)
+  lines := lines.push "## Dependency graph"
+  lines := lines.push ""
+  lines := lines.push "Click a node to navigate to its declaration."
+  lines := lines.push ""
+  let graphFence := codeFenceFor graphJson
+  lines := lines.push s!"{graphFence}graphEmbed"
+  lines := lines.push graphJson
+  lines := lines.push graphFence
+  lines := lines.push ""
+  -- Module pages: each # creates a separate page (TFB entries only, solution is on overview)
+  -- Order modules by minimum dependency layer
+  let layerMap := shadowLayerMapFromOrderedEntries tfbOnlyEntries
+  let mut byModule : Std.HashMap Name (Array ShadowEntry) := {}
+  let mut moduleMinLayer : Std.HashMap Name Nat := {}
+  for entry in tfbOnlyEntries do
+    byModule := byModule.insert entry.moduleName ((byModule.getD entry.moduleName #[]).push entry)
+    let layer := layerMap.getD entry.name 999
+    let prev := moduleMinLayer.getD entry.moduleName 999
+    if layer < prev then
+      moduleMinLayer := moduleMinLayer.insert entry.moduleName layer
+  let sortedModules := byModule.toArray.qsort fun a b =>
+    let la := moduleMinLayer.getD a.1 999
+    let lb := moduleMinLayer.getD b.1 999
+    if la == lb then a.1.lt b.1 else la < lb
+  for (modName, modEntries) in sortedModules do
+    let kinds := modEntries.map (·.kind.label) |>.toList.eraseDups
+    let kindSummary := String.intercalate ", " kinds
+    -- Plain text heading (no backticks) so TOC font matches Overview
+    let shortName := (modName.toString.dropPrefix s!"{rootPrefix}.").toString
+    lines := lines.push s!"# {shortName}"
+    lines := lines.push ""
+    lines := lines.push s!"Module `{modName}` — *{modEntries.size}* declarations ({kindSummary})"
+    lines := lines.push ""
+    for entry in modEntries do
+      lines ← appendShadowEntryBlock lines 2 entry repoUrl?
+  pure <| String.intercalate "\n" lines.toList
+
+private def renderComparatorManualMain : String :=
+  String.intercalate "\n" [
+    "import VersoManual",
+    s!"import {comparatorManualModule}",
+    "",
+    "open Verso.Genre Manual",
+    "",
+    s!"def main := manualMain (%doc {comparatorManualModule})"
+  ]
+
+private def renderComparatorManualSupport : String :=
+  String.intercalate "\n" [
+    "import VersoManual",
+    "import SubVerso.Compat",
+    "import SubVerso.Highlighting",
+    "import Verso.Code.External",
+    "",
+    "open Lean",
+    "open Verso Doc Elab ArgParse Genre.Manual",
+    "open Verso.Code.External",
+    "open ExternalCode",
+    "open SubVerso.Highlighting",
+    "",
+    s!"namespace {comparatorManualSupportModule}",
+    "",
+    "/-- True when the keyword name identifies a declaration-value construct",
+    "    (`where` or `|` at the declaration level). -/",
+    "private def isDeclValueKeyword (name : Name) : Bool :=",
+    "  match name with",
+    "  | .str _ \"whereStructInst\" => true",
+    "  | .str _ \"declValEqns\"     => true",
+    "  | _ => false",
+    "",
+    "/-- Walk the Highlighted tree and find the character offset where the",
+    "    declaration body begins. Matches:",
+    "    1. Keyword tokens named `whereStructInst` or `declValEqns`",
+    "    2. Unknown tokens with content `:=` at bracket depth 0",
+    "    Returns the character count of the signature prefix. -/",
+    "private def findDeclBodyOffset (hl : Highlighted) : Option Nat :=",
+    "  -- depth tracks bracket nesting: only `:=` at depth 0 is the declaration body",
+    "  let rec go (hl : Highlighted) (offset depth : Nat) : Option Nat × Nat × Nat :=",
+    "    match hl with",
+    "    | .token tok =>",
+    "        let len := tok.content.length",
+    "        -- Check for keyword-identified declaration values (where, |)",
+    "        let foundKeyword := match tok.kind with",
+    "          | .keyword (some name) _ _ => isDeclValueKeyword name",
+    "          | _ => false",
+    "        if foundKeyword then (some offset, offset + len, depth)",
+    "        else",
+    "          -- Check for `:=` at bracket depth 0 (unknown kind in SubVerso)",
+    "          let foundAssign := depth == 0 && tok.content == \":=\"",
+    "          if foundAssign then (some offset, offset + len, depth)",
+    "          else",
+    "            -- Track bracket depth",
+    "            let depth := match tok.content with",
+    "              | \"(\" | \"{\" | \"[\" | \"⦃\" | \"⟨\" => depth + 1",
+    "              | \")\" | \"}\" | \"]\" | \"⦄\" | \"⟩\" => depth - 1",
+    "              | _ => depth",
+    "            (none, offset + len, depth)",
+    "    | .text s => (none, offset + s.length, depth)",
+    "    | .unparsed s => (none, offset + s.length, depth)",
+    "    | .point _ _ => (none, offset, depth)",
+    "    | .span _ inner => go inner offset depth",
+    "    | .tactics _ _ _ inner => go inner offset depth",
+    "    | .seq hs =>",
+    "        let rec loop (items : List Highlighted) (offset depth : Nat) : Option Nat × Nat × Nat :=",
+    "          match items with",
+    "          | [] => (none, offset, depth)",
+    "          | h :: t =>",
+    "              let (result, offset', depth') := go h offset depth",
+    "              match result with",
+    "              | some _ => (result, offset', depth')",
+    "              | none   => loop t offset' depth'",
+    "        loop hs.toList offset depth",
+    "  (go hl 0 0).1",
+    "",
+    "private def takeExact (remaining : Nat) (hl : Highlighted) : Highlighted × Nat :=",
+    "  match hl with",
+    "  | .point kind info =>",
+    "      (.point kind info, remaining)",
+    "  | .text s =>",
+    "      if remaining >= s.length then",
+    "        (.text s, remaining - s.length)",
+    "      else",
+    "        (.text (SubVerso.Compat.String.take s remaining), 0)",
+    "  | .token tok =>",
+    "      if remaining >= tok.content.length then",
+    "        (.token tok, remaining - tok.content.length)",
+    "      else",
+    "        (.text (SubVerso.Compat.String.take tok.content remaining), 0)",
+    "  | .unparsed s =>",
+    "      if remaining >= s.length then",
+    "        (.unparsed s, remaining - s.length)",
+    "      else",
+    "        (.text (SubVerso.Compat.String.take s remaining), 0)",
+    "  | .span info inner =>",
+    "      let (inner', remaining') := takeExact remaining inner",
+    "      (if inner'.isEmpty then .empty else .span info inner', remaining')",
+    "  | .tactics info startPos endPos inner =>",
+    "      let (inner', remaining') := takeExact remaining inner",
+    "      (if inner'.isEmpty then .empty else .tactics info startPos endPos inner', remaining')",
+    "  | .seq hs =>",
+    "      let rec loop (remaining : Nat) (todo : List Highlighted) (acc : Highlighted) : Highlighted × Nat :=",
+    "        match todo with",
+    "        | [] => (acc, remaining)",
+    "        | h :: t =>",
+    "            let (h', remaining') := takeExact remaining h",
+    "            let acc := acc ++ h'",
+    "            if remaining' == 0 then",
+    "              (acc, 0)",
+    "            else",
+    "              loop remaining' t acc",
+    "      loop remaining hs.toList .empty",
+    "",
+    "-- Custom block that renders its child inside a collapsed <details> element.",
+    "def Block.collapsibleProof : Genre.Manual.Block where",
+    "  name := `ComparatorManualSupport.Block.collapsibleProof",
+    "",
+    "open Verso.Output Html in",
+    "@[block_extension Block.collapsibleProof]",
+    "def collapsibleProof.descr : BlockDescr where",
+    "  traverse _ _ _ := pure none",
+    "  toTeX := none",
+    "  extraCss := [",
+    "    -- Warm academic theme from the exposition site",
+    "    \":root { --site-ink: #193428; --site-muted: #5a655f; --site-warm: #fbf7ef; --site-card: #fffdf8; --site-accent: #a14d2a; --site-border: #d8cdbd; --verso-structure-color: #154734; --verso-toc-background-color: #f4efe5; --verso-selected-color: #f0dcc8; --verso-text-font-family: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif; --verso-structure-font-family: 'Avenir Next Condensed', 'Gill Sans', sans-serif; --verso-code-font-family: 'Iosevka Term', 'JetBrains Mono', monospace; }\",",
+    "    \"body { color: var(--site-ink); }\",",
+    "    -- Code block styling",
+    "    \".hl.lean.block { background: #faf4e8; border: 1px solid #eadfcf; border-radius: 10px; padding: 0.85rem 1rem; box-shadow: inset 0 1px 0 rgba(255,255,255,0.7); }\",",
+    "    -- Collapsible proof styling",
+    "    \"details.collapsible-proof > summary { cursor: pointer; color: var(--site-muted, #666); font-style: italic; margin: 0.3em 0; user-select: none; font-family: var(--verso-structure-font-family, sans-serif); font-size: 0.88rem; }\",",
+    "    \"details.collapsible-proof > summary:hover { color: var(--site-accent, #a14d2a); }\",",
+    "    -- Section heading accents",
+    "    \"main section > h2, main section > h3, main section > h4 { border-left: 4px solid var(--verso-structure-color, #154734); padding-left: 0.6rem; }\",",
+    "    \".decl-anchor { height: 0; margin: 0; padding: 0; }\"]",
+    "  toHtml := some fun _goI goB _id _data blocks => do",
+    "    let inner ← blocks.mapM (goB ·)",
+    "    pure {{ <details class=\"collapsible-proof\"><summary>\"Show proof\"</summary>{{inner}}</details> }}",
+    "",
+    "-- Invisible anchor block that registers a constant in the docstring domain",
+    "-- for cross-reference linking. Renders only an empty anchor div.",
+    "def Block.declAnchor (declName : String) : Genre.Manual.Block where",
+    "  name := `ComparatorManualSupport.Block.declAnchor",
+    "  data := Lean.toJson declName",
+    "",
+    "open Verso.Output Html in",
+    "@[block_extension Block.declAnchor]",
+    "def declAnchor.descr : BlockDescr where",
+    "  traverse id info _ := do",
+    "    let some declName := info.getStr? |>.toOption | pure none",
+    "    let path ← (·.path) <$> read",
+    "    let _ ← Verso.Genre.Manual.externalTag id path declName",
+    "    modify fun st => st.saveDomainObject Verso.Genre.Manual.docstringDomain declName id",
+    "    pure none",
+    "  toTeX := none",
+    "  toHtml := some fun _goI _goB id _info _blocks => open Verso.Output Html Verso.Doc.Html in do",
+    "    let xref ← HtmlT.state",
+    "    let idAttr := xref.htmlId id",
+    "    pure {{ <div class=\"decl-anchor\" {{idAttr}}></div> }}",
+    "",
+    "private abbrev ManualDocBlock := Verso.Doc.Block Verso.Genre.Manual",
+    "",
+    "def wrapDeclAnchor (declName : String) : ManualDocBlock :=",
+    "  .other (Block.declAnchor declName) #[]",
+    "",
+    "private def stringTail (s : String) (n : Nat) : String :=",
+    "  String.ofList (s.toList.drop n)",
+    "",
+    "private def dropExact (n : Nat) (hl : Highlighted) : Highlighted :=",
+    "  let rec go (remaining : Nat) (hl : Highlighted) : Highlighted × Nat :=",
+    "    match hl with",
+    "    | .point _ _ => (.empty, remaining)",
+    "    | .text s =>",
+    "        if remaining >= s.length then (.empty, remaining - s.length)",
+    "        else (.text (stringTail s remaining), 0)",
+    "    | .token tok =>",
+    "        if remaining >= tok.content.length then (.empty, remaining - tok.content.length)",
+    "        else (.token { tok with content := stringTail tok.content remaining }, 0)",
+    "    | .unparsed s =>",
+    "        if remaining >= s.length then (.empty, remaining - s.length)",
+    "        else (.unparsed (stringTail s remaining), 0)",
+    "    | .span info inner =>",
+    "        let (inner', remaining') := go remaining inner",
+    "        (if inner'.isEmpty then .empty else .span info inner', remaining')",
+    "    | .tactics info startPos endPos inner =>",
+    "        let (inner', remaining') := go remaining inner",
+    "        (if inner'.isEmpty then .empty else .tactics info startPos endPos inner', remaining')",
+    "    | .seq hs =>",
+    "        let rec loop (remaining : Nat) (todo : List Highlighted) : Highlighted × Nat :=",
+    "          match todo with",
+    "          | [] => (.empty, remaining)",
+    "          | h :: t =>",
+    "              if remaining == 0 then (.seq (h :: t).toArray, 0)",
+    "              else",
+    "                let (tail, remaining') := go remaining h",
+    "                if remaining' == 0 then",
+    "                  -- h spans the boundary; include its tail + rest",
+    "                  if tail.isEmpty then (.seq t.toArray, 0)",
+    "                  else (.seq (tail :: t).toArray, 0)",
+    "                else",
+    "                  loop remaining' t",
+    "        loop remaining hs.toList",
+    "  (go n hl).1",
+    "",
+    "-- Dependency graph block: renders a D3 force-directed graph from embedded JSON data.",
+    "def Block.dependencyGraph (graphJson : String) : Genre.Manual.Block where",
+    "  name := `ComparatorManualSupport.Block.dependencyGraph",
+    "  data := Lean.Json.str graphJson",
+    "",
+    "open Verso.Output Html in",
+    "@[block_extension Block.dependencyGraph]",
+    "def dependencyGraph.descr : BlockDescr where",
+    "  traverse _ _ _ := pure none",
+    "  toTeX := none",
+    "  extraJs := [\"document.addEventListener('DOMContentLoaded',function(){var el=document.getElementById('graph-data');if(!el)return;var data=JSON.parse(el.textContent);var root=document.getElementById('graph-root');if(!root)return;var w=root.clientWidth,h=600;var svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('width','100%');svg.setAttribute('height',h);svg.setAttribute('viewBox','0 0 '+w+' '+h);root.appendChild(svg);var nodeMap={};data.nodes.forEach(function(n){nodeMap[n.id]=n;});var groups=Array.from(new Set(data.nodes.map(function(n){return n.groupKey})));var colors=['#3d6b59','#b96d2d','#7a4e7a','#2f5f87','#8a3b3b','#5f6f2e','#9a5b8f','#6b5041'];function groupColor(g){return colors[groups.indexOf(g)%colors.length]}var sim=d3.forceSimulation(data.nodes).force('link',d3.forceLink(data.edges).id(function(d){return d.id}).distance(80).strength(0.2)).force('charge',d3.forceManyBody().strength(-210)).force('center',d3.forceCenter(w/2,h/2)).force('collide',d3.forceCollide(22));var g=document.createElementNS('http://www.w3.org/2000/svg','g');svg.appendChild(g);var linkG=document.createElementNS('http://www.w3.org/2000/svg','g');g.appendChild(linkG);var nodeG=document.createElementNS('http://www.w3.org/2000/svg','g');g.appendChild(nodeG);data.edges.forEach(function(e){var line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('stroke','#b8b0a4');line.setAttribute('stroke-opacity','0.6');line.setAttribute('stroke-width','1.2');line._data=e;linkG.appendChild(line)});data.nodes.forEach(function(n){var ng=document.createElementNS('http://www.w3.org/2000/svg','g');ng.setAttribute('cursor','pointer');var c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('r','10');c.setAttribute('fill',groupColor(n.groupKey));c.setAttribute('stroke','#1f6b4b');c.setAttribute('stroke-width','2');ng.appendChild(c);var t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('dx','14');t.setAttribute('dy','4');t.setAttribute('font-size','11');t.setAttribute('fill','#333');t.textContent=n.label;ng.appendChild(t);ng._data=n;ng.addEventListener('click',function(){if(n.href)window.location.href=n.href});nodeG.appendChild(ng)});sim.on('tick',function(){linkG.childNodes.forEach(function(l){l.setAttribute('x1',l._data.source.x);l.setAttribute('y1',l._data.source.y);l.setAttribute('x2',l._data.target.x);l.setAttribute('y2',l._data.target.y)});nodeG.childNodes.forEach(function(ng){var d=ng._data;ng.setAttribute('transform','translate('+d.x+','+d.y+')')})});var zoom=d3.zoom().scaleExtent([0.25,4]).on('zoom',function(e){g.setAttribute('transform',e.transform)});d3.select(svg).call(zoom)})\"]",
+    "  extraCss := [\"#graph-root { background: var(--site-card, #fffdf8); border: 1px solid var(--site-border, #d8cdbd); border-radius: 14px; min-height: 620px; padding: 1rem; margin: 1rem 0; } #graph-root svg { display: block; }\"]",
+    "  toHtml := some fun _goI _goB _id info _blocks => open Output.Html in do",
+    "    let graphJson := info.getStr? |>.toOption |>.getD \"{}\"",
+    "    pure {{ <div id=\"graph-root\"><script id=\"graph-data\" type=\"application/json\">{{graphJson}}</script><script src=\"https://d3js.org/d3.v7.min.js\"></script></div> }}",
+    "",
+    "def wrapCollapsible (body : ManualDocBlock) : ManualDocBlock :=",
+    "  .other Block.collapsibleProof #[body]",
+    "",
+    "def wrapDependencyGraph (graphJson : String) : ManualDocBlock :=",
+    "  .other (Block.dependencyGraph graphJson) #[]",
+    "",
+    "/-- Embed an interactive dependency graph. The code block body is the JSON data. -/",
+    "@[code_block_expander graphEmbed]",
+    "public meta def graphEmbed : CodeBlockExpander",
+    "  | _args, code => do",
+    "    let json := code.getString",
+    "    pure #[← ``(wrapDependencyGraph $(quote json))]",
+    "",
+    "/-- Register a declaration name as a cross-reference anchor. Renders nothing. -/",
+    "@[code_block_expander declAnchorEmbed]",
+    "public meta def declAnchorEmbed : CodeBlockExpander",
+    "  | _args, code => do",
+    "    let declName := code.getString.trim",
+    "    pure #[← ``(wrapDeclAnchor $(quote declName))]",
+    "",
+    "/-- Render an anchored external Lean block with the proof body inside",
+    "    a collapsed `<details>` element. The signature is always visible. -/",
+    "@[code_block_expander collapsibleModule]",
+    "public meta def collapsibleModule : CodeBlockExpander",
+    "  | args, _code => withTraceNode `Elab.Verso (fun _ => pure m!\"collapsibleModule\") <| do",
+    "    let cfg@{ module := moduleName, project, anchor?, showProofStates := _, defSite := _ } ← parseThe CodeContext args",
+    "    withAnchored project moduleName anchor? fun hl => do",
+    "      match findDeclBodyOffset hl with",
+    "      | some offset =>",
+    "          let headHl := (takeExact offset hl).1",
+    "          let bodyHl := dropExact offset hl",
+    "          let headBlock ← ``(leanBlock $(quote headHl) $(quote cfg.toCodeConfig))",
+    "          let bodyBlock ← ``(leanBlock $(quote bodyHl) $(quote cfg.toCodeConfig))",
+    "          pure #[headBlock, ← ``(wrapCollapsible $bodyBlock)]",
+    "      | none =>",
+    "          pure #[← ``(leanBlock $(quote hl) $(quote cfg.toCodeConfig))]",
+    "",
+    s!"end {comparatorManualSupportModule}"
+  ]
+
+private def writeComparatorManualFiles (env : Environment) (shadowDir : System.FilePath) (tfbInfo : TrustedBaseInfo)
+    (entries : Array ShadowEntry) (rootPrefix : Name) (repoUrl? : Option String := none)
+    (trustedBaseRawUrl? : Option String := none) : IO Unit := do
+  IO.FS.writeFile (shadowDir / s!"{comparatorManualSupportModule}.lean") renderComparatorManualSupport
+  IO.FS.writeFile (shadowDir / s!"{comparatorManualModule}.lean")
+    (← renderComparatorManual env tfbInfo entries rootPrefix repoUrl? trustedBaseRawUrl?)
+  IO.FS.writeFile (shadowDir / s!"{comparatorManualMainModule}.lean") renderComparatorManualMain
+
+private def insertBeforeMarkerOrAppend (contents marker block : String) : String :=
+  if contents.contains marker then
+    let parts := contents.splitOn marker
+    match parts with
+    | first :: second :: rest =>
+        first ++ block ++ marker ++ String.intercalate marker (second :: rest)
+    | _ => contents ++ block
+  else
+    contents ++ block
+
+private def ensureVersoInShadowProject (shadowDir : System.FilePath) : IO Unit := do
+  let lakeToml := shadowDir / "lakefile.toml"
+  let lakeLean := shadowDir / "lakefile.lean"
+  let toolchainFile := shadowDir / "lean-toolchain"
+  let versoRev ←
+    if ← toolchainFile.pathExists then
+      pure <| versoRevOfToolchain (← IO.FS.readFile toolchainFile)
+    else
+      pure versoShadowRev
+  if ← lakeToml.pathExists then
+    let mut contents ← IO.FS.readFile lakeToml
+    if !contents.contains "name = \"verso\"" then
+      let versoBlock := String.intercalate "\n" [
+        "",
+        "[[require]]",
+        "name = \"verso\"",
+        s!"git = \"{versoShadowGit}\"",
+        s!"rev = \"{versoRev}\"",
+        ""
+      ]
+      contents := insertBeforeMarkerOrAppend contents "[[require]]\nname = \"mathlib\"" versoBlock
+    if !contents.contains s!"name = \"{comparatorManualModule}\"" then
+      contents := contents ++ String.intercalate "\n" [
+        "",
+        "[[lean_lib]]",
+        s!"name = \"{comparatorManualModule}\"",
+        "srcDir = \".\"",
+        ""
+      ]
+    if !contents.contains s!"name = \"{comparatorManualSupportModule}\"" then
+      contents := contents ++ String.intercalate "\n" [
+        "",
+        "[[lean_lib]]",
+        s!"name = \"{comparatorManualSupportModule}\"",
+        "srcDir = \".\"",
+        ""
+      ]
+    if !contents.contains s!"name = \"{comparatorManualExe}\"" then
+      contents := contents ++ String.intercalate "\n" [
+        "",
+        "[[lean_exe]]",
+        s!"name = \"{comparatorManualExe}\"",
+        s!"root = \"{comparatorManualMainModule}\"",
+        "supportInterpreter = true",
+        ""
+      ]
+    IO.FS.writeFile lakeToml contents
+  else if ← lakeLean.pathExists then
+    let mut contents ← IO.FS.readFile lakeLean
+    if !contents.contains "require verso from git" then
+      let versoBlock := String.intercalate "\n" [
+        "",
+        s!"require verso from git \"{versoShadowGit}\" @ \"{versoRev}\"",
+        ""
+      ]
+      contents := insertBeforeMarkerOrAppend contents "require mathlib" versoBlock
+    if !contents.contains s!"lean_lib {comparatorManualModule}" then
+      contents := contents ++ String.intercalate "\n" [
+        "",
+        s!"lean_lib {comparatorManualModule} where",
+        "  srcDir := \".\"",
+        ""
+      ]
+    if !contents.contains s!"lean_lib {comparatorManualSupportModule}" then
+      contents := contents ++ String.intercalate "\n" [
+        "",
+        s!"lean_lib {comparatorManualSupportModule} where",
+        "  srcDir := \".\"",
+        ""
+      ]
+    if !contents.contains s!"lean_exe {comparatorManualExe}" then
+      contents := contents ++ String.intercalate "\n" [
+        "",
+        s!"lean_exe {comparatorManualExe} where",
+        s!"  root := `{comparatorManualMainModule}",
+        "  supportInterpreter := true",
+        ""
+      ]
+    IO.FS.writeFile lakeLean contents
+
+private def renderProcessCommand (cmd : String) (args : Array String) : String :=
+  String.intercalate " " <| cmd :: args.toList
+
+private def printProcessOutput (out : IO.Process.Output) : IO Unit := do
+  if !out.stdout.isEmpty then
+    IO.print out.stdout
+  if !out.stderr.isEmpty then
+    IO.eprint out.stderr
+
+private def runShadowCommand (shadowDir : System.FilePath) (cmd : String) (args : Array String) : IO Unit := do
+  let display := renderProcessCommand cmd args
+  IO.println s!"[shadow] {display}"
+  let out ← IO.Process.output {
+    cmd := cmd
+    args := args
+    cwd := some shadowDir
+  }
+  printProcessOutput out
+  if out.exitCode != 0 then
+    throw <| IO.userError s!"shadow command failed ({display})"
+
+private def missingCacheExecutable (out : IO.Process.Output) : Bool :=
+  let text := out.stdout ++ out.stderr
+  text.contains "unknown executable cache"
+    || text.contains "unknown executable 'cache'"
+    || text.contains "unknown executable `cache`"
+
+private def pullShadowCache (shadowDir : System.FilePath) : IO Unit := do
+  let display := "lake exe cache get"
+  IO.println s!"[shadow] {display}"
+  let out ← IO.Process.output {
+    cmd := "lake"
+    args := #["exe", "cache", "get"]
+    cwd := some shadowDir
+  }
+  printProcessOutput out
+  if out.exitCode == 0 then
+    return
+  if missingCacheExecutable out then
+    IO.println "[shadow] skipping cache pull; no `cache` executable is defined in the shadow workspace."
+    return
+  throw <| IO.userError s!"shadow command failed ({display})"
+
+private def updateShadowDependencies (shadowDir : System.FilePath) : IO Unit := do
+  let manifest := shadowDir / "lake-manifest.json"
+  if ← manifest.pathExists then
+    runShadowCommand shadowDir "lake" #["update", "verso"]
+  else
+    runShadowCommand shadowDir "lake" #["update"]
+
+private def splitShadowPages (shadowDir : System.FilePath) : IO Unit := do
+  let htmlDir := shadowSiteDir shadowDir
+  let scriptPath := (← IO.currentDir) / shadowDir / "_split_pages.py"
+  -- Find the split script from the exposition project root
+  let exePath ← IO.appPath
+  let projectRoot := exePath.parent.getD "." |>.parent.getD "." |>.parent.getD "." |>.parent.getD "."
+  let srcScript := projectRoot / "scripts" / "split_pages.py"
+  if ← srcScript.pathExists then
+    IO.FS.writeBinFile scriptPath (← IO.FS.readBinFile srcScript)
+  else
+    throw <| IO.userError s!"split_pages.py not found at {srcScript}; cannot split pages"
+  IO.println s!"[shadow] splitting pages: {htmlDir}"
+  let out ← IO.Process.output {
+    cmd := "python3"
+    args := #[scriptPath.toString, htmlDir.toString]
+  }
+  printProcessOutput out
+  if out.exitCode != 0 then
+    IO.eprintln "[shadow] warning: page splitting failed, keeping single-page output"
+
+private def buildShadowSite (shadowDir : System.FilePath) : IO Unit := do
+  updateShadowDependencies shadowDir
+  pullShadowCache shadowDir
+  runShadowCommand shadowDir "lake" #["build", comparatorManualExe]
+  runShadowCommand shadowDir "lake" #["exe", comparatorManualExe]
+  splitShadowPages shadowDir
+
+
+private unsafe def writeComparatorShadow (projectDir shadowDir : System.FilePath)
+    (rootPrefix : Name) (env : Environment) (tfbInfo : TrustedBaseInfo)
+    (entries : Array ShadowEntry) (repoUrl? : Option String := none)
+    (trustedBaseRawUrl? : Option String := none) : IO Unit := do
+  if ← shadowDir.pathExists then
+    clearShadowDirPreservingLake shadowDir
+  else
+    IO.FS.createDirAll shadowDir
+  let entryModules := entries.foldl (fun acc e => acc.insert e.moduleName) ({} : Std.HashSet Name)
+  let closure ← moduleImportClosure projectDir rootPrefix entryModules.toArray
+  IO.println s!"[shadow] module closure: {closure.size} modules"
+  let generatedFiles ← generatedShadowFiles entries
+  copySelectiveModules projectDir shadowDir closure generatedFiles
+  copyShadowConfigFiles projectDir shadowDir
+  ensureVersoInShadowProject shadowDir
+  writeShadowManifest shadowDir tfbInfo entries
+  writeComparatorManualFiles env shadowDir tfbInfo entries rootPrefix repoUrl? trustedBaseRawUrl?
+  buildShadowSite shadowDir
+
+private def detectRepoUrl (projectDir : System.FilePath) : IO (Option String) := do
+  let result ← IO.Process.output {
+    cmd := "git"
+    args := #["remote", "get-url", "origin"]
+    cwd := some projectDir
+  }
+  if result.exitCode != 0 then return none
+  let url := result.stdout.trimAscii.toString
+  if url.isEmpty then return none
+  -- Convert SSH URLs (git@github.com:owner/repo.git) to HTTPS
+  if url.startsWith "git@" then
+    let url := (url.dropPrefix "git@").toString
+    let url := url.replace ":" "/"
+    let url := if url.endsWith ".git" then (url.dropEnd 4).toString else url
+    return some s!"https://{url}"
+  -- Strip trailing .git from HTTPS URLs
+  let url := if url.endsWith ".git" then (url.dropEnd 4).toString else url
+  return some url
 
 private def withCurrentDir {α : Type} (dir : System.FilePath) (act : IO α) : IO α := do
   let cwd ← IO.Process.getCurrentDir
@@ -2183,8 +1608,13 @@ private def withCurrentDir {α : Type} (dir : System.FilePath) (act : IO α) : I
 private def loadWorkspaceAt (projectDir : System.FilePath) : IO Lake.Workspace := do
   let projectDir := projectDir.normalize
   let (elanInstall?, leanInstall?, lakeInstall?) ← Lake.findInstall?
-  let cfg ← Lake.MonadError.runEIO <| Lake.mkLoadConfig { elanInstall?, leanInstall?, lakeInstall? }
-  let ws? ← withCurrentDir projectDir <| Lake.loadWorkspace cfg |>.toBaseIO
+  let cfg ← Lake.MonadError.runEIO <| Lake.mkLoadConfig {
+    elanInstall?
+    leanInstall?
+    lakeInstall?
+    rootDir := projectDir
+  }
+  let ws? ← Lake.loadWorkspace cfg |>.toBaseIO
   match ws? with
   | some ws => pure ws
   | none => throw <| IO.userError s!"failed to load Lake workspace at {projectDir}"
@@ -2214,42 +1644,36 @@ unsafe def mainImpl (args : List String) : IO UInt32 := do
     | .error err =>
         IO.eprintln err
         return 1
+  let cfg ← do
+    if cfg.repoUrl.isSome then pure cfg
+    else
+      let detected ← detectRepoUrl cfg.projectDir
+      pure { cfg with repoUrl := detected }
   let ws ← loadWorkspaceAt cfg.projectDir
   let some rootPrefix := cfg.rootPrefix <|> firstRootPrefix ws cfg.excludeLibs
     | IO.eprintln "Could not determine a root module prefix. Pass --root PREFIX."
       return 1
   let imports := importRoots ws cfg.excludeLibs
   let env ← loadEnv cfg.projectDir ws imports
-  let decls ← collectDecls cfg.projectDir rootPrefix ws.root env
-  if decls.isEmpty then
-    let namedCount :=
-      env.constants.toList.foldl (fun n entry =>
-        let name := entry.1
-        n + if hasPrefixName name rootPrefix then 1 else 0) 0
-    IO.eprintln s!"No declarations exposed under module filtering. Declarations with matching name prefix: {namedCount}"
-  else
-    IO.println s!"Collected {decls.size} declarations under {rootPrefix}"
-  let tfbInfo ← loadTrustedBaseInfo cfg rootPrefix
-  let decls := decls |> attachReverseDeps |> attachDependsOnSorry |> attachTrustedBaseFlags tfbInfo.names
-  let order ← moduleOrderMap cfg.projectDir rootPrefix
-  let modules := buildModules rootPrefix order decls
-  let groups := buildGroups order modules
-  let declHrefs := declHrefMap decls
-  let (introBlocks, extraParts) ← loadProjectContextParts cfg.projectDir cfg.repoUrl
-  let tfbGroups := buildGroups order <| buildModules rootPrefix order <| decls.filter (·.inTfb)
-  let targetBlocks ← loadTrustedBaseTargetBlocks cfg.projectDir cfg.repoUrl tfbInfo
-  let hasContext := extraParts.any fun part => part.metadata.bind PartMetadata.file == some "context"
-  let extraParts :=
-    if tfbInfo.comparator?.isSome then
-      extraParts.push <| mkTrustedBasePart tfbGroups cfg.repoUrl declHrefs targetBlocks
-    else
-      extraParts
-  let readerGuideBlocks := mkReaderGuideBlocks hasContext tfbInfo.comparator?.isSome
-  let root := mkRootPart cfg rootPrefix groups decls declHrefs introBlocks readerGuideBlocks extraParts
-  let versoArgs :=
-    match cfg.outputDir with
-    | some out => ["--output", out]
-    | none => []
-  manualMain root (options := versoArgs) (config := renderConfig)
+  let tfbInfo ← loadTrustedBaseInfo cfg rootPrefix env
+  if let some shadowDir := cfg.shadowOutputDir then
+    match tfbInfo.comparator? with
+    | none =>
+        IO.eprintln "--write-shadow requires a comparator config."
+        return 1
+    | some _ =>
+        let entries ← loadShadowEntries cfg.projectDir rootPrefix ws.root env (selectedShadowTags tfbInfo)
+        writeComparatorShadow cfg.projectDir shadowDir rootPrefix env tfbInfo entries
+          cfg.repoUrl cfg.trustedBaseRawUrl
+        IO.println s!"Wrote {entries.size} anchored declarations to {shadowDir}"
+        IO.println s!"Manifest: {shadowManifestPath shadowDir}"
+        IO.println s!"Shadow site: {shadowSiteIndexPath shadowDir}"
+  else if cfg.shadowOnly then
+    IO.eprintln "--shadow-only requires --write-shadow DIR."
+    return 1
+  if cfg.shadowOnly then
+    return 0
+  IO.eprintln "Non-shadow rendering path is not available. Pass --write-shadow DIR --shadow-only."
+  return 1
 
 end LeanExposition
