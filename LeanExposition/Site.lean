@@ -433,7 +433,7 @@ private def shouldExpose (env : Environment) (rootPrefix : Name) (name : Name) (
     if !hasPrefixName moduleName rootPrefix then
       false
     else
-      (Informal.classifyNonUser env name).isNone
+      (Stan.classifyNonUser env name).isNone
   else
     false
 
@@ -1045,13 +1045,13 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
   lines := lines.push ""
   for target in comparator.theoremNames do
     if let some ci := env.find? target then
-      let rawDeps := Informal.collectDeps env target ci
+      let rawDeps := Stan.collectDeps env target ci
       let sorted := rawDeps.toArray.qsort Name.lt
       let mut resolvedUserSet : Std.HashSet Name := {}
       let mut auxCount := 0
       for dep in sorted do
-        let resolved := Informal.resolveToUser env dep
-        if (Informal.classifyNonUser env resolved).isNone then
+        let resolved := Stan.resolveToUser env dep
+        if (Stan.classifyNonUser env resolved).isNone then
           resolvedUserSet := resolvedUserSet.insert resolved
         else
           auxCount := auxCount + 1
@@ -1059,8 +1059,8 @@ private def renderComparatorManual (env : Environment) (tfbInfo : TrustedBaseInf
       lines := lines.push s!"*{sorted.size}* raw constants: *{userCount}* user-facing, *{auxCount}* auxiliary."
       lines := lines.push ""
       for dep in sorted do
-        let classification := Informal.classifyNonUser env dep
-        let resolved := Informal.resolveToUser env dep
+        let classification := Stan.classifyNonUser env dep
+        let resolved := Stan.resolveToUser env dep
         let kind := match classification with
           | none => "user"
           | some (.isProjection _) => "projection"

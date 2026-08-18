@@ -1,7 +1,7 @@
 import Lean
 import Informal
 
-open Lean Informal
+open Lean Informal Stan
 
 namespace LeanExposition
 
@@ -29,7 +29,7 @@ private def isInReportedModule (env : Environment) (cfg : TrustedBaseConfig) (c 
   | none => false
 
 /-- Filter a raw dependency set to project-local, user-facing declarations.
-    Uses lean-informal's `classifyNonUser` and `resolveToUser` for resolution,
+    Uses lean-stan's `classifyNonUser` and `resolveToUser` for resolution,
     then restricts to declarations in reported modules. -/
 private def filterAndResolveDeps (env : Environment) (cfg : TrustedBaseConfig)
     (rawDeps : NameSet) : NameSet := Id.run do
@@ -41,7 +41,7 @@ private def filterAndResolveDeps (env : Environment) (cfg : TrustedBaseConfig)
   resolved
 
 /-- Compute the trusted base for a single target declaration.
-    Uses lean-informal's `collectDeps` for transitive dependency collection
+    Uses lean-stan's `collectDeps` for transitive dependency collection
     (proof-irrelevant: theorem values are skipped, only types followed),
     then resolves and filters to user-facing project-local declarations. -/
 def extractTrustedBase (env : Environment) (cfg : TrustedBaseConfig) (target : Name)
